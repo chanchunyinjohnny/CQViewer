@@ -30,6 +30,8 @@ class MessageTable(ttk.Frame):
         self._filtered_messages: list[Message] = []
         self._current_page = 0
         self._columns: list[str] = []
+        self._hidden_columns: set[str] = set()
+        self._all_columns: list[str] = []  # All available columns including hidden
 
         self._setup_style()
         self._setup_ui()
@@ -108,6 +110,14 @@ class MessageTable(ttk.Frame):
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self._tree.bind("<Double-1>", self._on_double_click)
 
+        # Bind right-click for column context menu
+        self._tree.bind("<Button-3>", self._on_right_click)
+        # Bind double-click on column separator for auto-width
+        self._tree.bind("<Double-Button-1>", self._on_header_double_click)
+
+        # Create column context menu
+        self._column_menu = tk.Menu(self._tree, tearoff=0)
+
         # Pagination controls
         self._pagination_frame = ttk.Frame(self)
         self._pagination_frame.grid(row=1, column=0, sticky="ew", pady=5)
@@ -148,11 +158,12 @@ class MessageTable(ttk.Frame):
         Args:
             columns: List of column names
         """
-        self._columns = columns
+        self._all_columns = columns.copy()
+        self._columns = [c for c in columns if c not in self._hidden_columns]
 
         # Configure treeview columns
-        self._tree["columns"] = columns
-        for col in columns:
+        self._tree["columns"] = self._columns
+        for col in self._columns:
             # Add column header with sort functionality
             self._tree.heading(
                 col,
@@ -325,3 +336,120 @@ class MessageTable(ttk.Frame):
         self._current_page = 0
         self._page_label.config(text="Page 0 of 0")
         self._count_label.config(text="")
+
+    def _on_right_click(self, event: tk.Event) -> None:
+        """Handle right-click for column context menu."""
+        # Check if clicked on header
+        region = self._tree.identify_region(event.x, event.y)
+        if region == "heading":
+            col_id = self._tree.identify_column(event.x)
+            if col_id:
+                # Get column name (col_id is like '#1', '#2', etc.)
+                try:
+                    col_index = int(col_id[1:]) - 1
+                    if 0 <= col_index < len(self._columns):
+                        col_name = self._columns[col_index]
+                        self._show_column_menu(event, col_name)
+                except (ValueError, IndexError):
+                    pass
+
+    def _show_column_menu(self, event: tk.Event, column: str) -> None:
+        """Show context menu for a column."""
+        self._column_menu.delete(0, "end")
+
+        # Hide this column option
+        self._column_menu.add_command(
+            label=f"Hide '{column}'",
+            command=lambda: self._hide_column(column)
+        )
+
+        self._column_menu.add_separator()
+
+        # Auto-fit width
+        self._column_menu.add_command(
+            label="Auto-fit Width",
+            command=lambda: self._auto_fit_column(column)
+        )
+
+        self._column_menu.add_separator()
+
+        # Show hidden columns submenu
+        if self._hidden_columns:
+            show_menu = tk.Menu(self._column_menu, tearoff=0)
+            for hidden_col in sorted(self._hidden_columns):
+                show_menu.add_command(
+                    label=hidden_col,
+                    command=lambda c=hidden_col: self._show_column(c)
+                )
+            self._column_menu.add_cascade(label="Show Column", menu=show_menu)
+
+            self._column_menu.add_command(
+                label="Show All Columns",
+                command=self._show_all_columns
+            )
+
+        self._column_menu.tk_popup(event.x_root, event.y_root)
+
+    def _hide_column(self, column: str) -> None:
+        """Hide a column."""
+        if column in self._columns:
+            self._hidden_columns.add(column)
+            self.set_columns(self._all_columns)
+            self._refresh_display()
+
+    def _show_column(self, column: str) -> None:
+        """Show a hidden column."""
+        if column in self._hidden_columns:
+            self._hidden_columns.discard(column)
+            self.set_columns(self._all_columns)
+            self._refresh_display()
+
+    def _show_all_columns(self) -> None:
+        """Show all hidden columns."""
+        self._hidden_columns.clear()
+        self.set_columns(self._all_columns)
+        self._refresh_display()
+
+    def _on_header_double_click(self, event: tk.Event) -> None:
+        """Handle double-click on column header/separator for auto-width."""
+        region = self._tree.identify_region(event.x, event.y)
+
+        # Check if it's on the heading or separator
+        if region in ("heading", "separator"):
+            col_id = self._tree.identify_column(event.x)
+            if col_id:
+                try:
+                    col_index = int(col_id[1:]) - 1
+                    if 0 <= col_index < len(self._columns):
+                        col_name = self._columns[col_index]
+                        self._auto_fit_column(col_name)
+                        return  # Don't propagate to row double-click
+                except (ValueError, IndexError):
+                    pass
+
+        # If not on header, fall through to row double-click
+        if region == "cell":
+            self._on_tree_select(event)
+
+    def _auto_fit_column(self, column: str) -> None:
+        """Auto-fit column width to content."""
+        if column not in self._columns:
+            return
+
+        # Calculate max width from header
+        max_width = len(column) * 10 + 20
+
+        # Calculate max width from visible content
+        for item in self._tree.get_children():
+            col_index = self._columns.index(column)
+            values = self._tree.item(item, "values")
+            if col_index < len(values):
+                value_str = str(values[col_index])
+                # Estimate width: ~8 pixels per character + padding
+                width = len(value_str) * 8 + 20
+                max_width = max(max_width, width)
+
+        # Cap at reasonable max
+        max_width = min(max_width, 500)
+
+        self._tree.column(column, width=max_width)

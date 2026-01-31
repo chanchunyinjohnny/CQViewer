@@ -64,6 +64,9 @@ python -m cqviewer.cli info data.cq4
 The CLI works without any external dependencies:
 
 ```bash
+# Open a folder (loads .cq4, .cq4t, and Java classes automatically)
+cqviewer open ./my-data-folder/
+
 # Show file information
 cqviewer info data.cq4
 
@@ -102,6 +105,7 @@ cqviewer types data.cq4
 
 | Command | Description |
 |---------|-------------|
+| `open` | Open a folder containing .cq4, .cq4t, and Java class files |
 | `info` | Show file information and type summary |
 | `list` | List messages with pagination |
 | `show` | Show details of a single message |
@@ -116,7 +120,9 @@ cqviewer types data.cq4
 | Option | Description |
 |--------|-------------|
 | `-T, --tailer FILE` | Path to .cq4t tailer/metadata file |
-| `-S, --schema FILE` | Path to schema JSON file for BINARY_LIGHT decoding |
+| `-S, --schema FILE` | Java schema file (.java or .class) for BINARY_LIGHT decoding |
+| `-D, --schema-dir DIR` | Directory containing Java files (loads all including nested classes) |
+| `-E, --encoding` | Force encoding format: `binary`, `thrift`, or `sbe` |
 | `-m, --metadata` | Include metadata messages |
 | `-n, --limit N` | Limit number of results |
 | `-o, --offset N` | Start from offset N |
@@ -126,7 +132,7 @@ cqviewer types data.cq4
 
 ### Schema Support for BINARY_LIGHT Format
 
-When Chronicle Queue uses BINARY_LIGHT wire format, messages are serialized without field names. To decode these messages, provide your Java bean class file directly:
+When Chronicle Queue uses BINARY_LIGHT wire format, messages are serialized without field names. To decode these messages, provide your Java bean class files directly:
 
 ```bash
 # Use a single Java source file
@@ -141,6 +147,31 @@ cqviewer list data.cq4 -S FxTick.java -S Order.java -S Trade.java
 # Parse a Java file and see extracted fields
 cqviewer schema --parse FxTick.java
 ```
+
+#### Directory Mode (Recommended for Nested Classes)
+
+When your data structures include nested or inner classes, use directory mode to load all related class definitions at once:
+
+```bash
+# Load all Java files from a directory (including nested classes)
+cqviewer list data.cq4 -D ./src/main/java/com/example/model/
+
+# Load compiled classes from target directory
+cqviewer list data.cq4 -D ./target/classes/com/example/model/
+
+# Scan a directory to see all discovered classes
+cqviewer schema --scan-dir ./src/main/java/com/example/model/
+
+# Force specific encoding for directory
+cqviewer list data.cq4 -D ./models/ -E thrift
+cqviewer list data.cq4 -D ./models/ -E sbe
+```
+
+Directory mode benefits:
+- Automatically discovers all `.java` and `.class` files recursively
+- Extracts inner/nested classes from `.java` source files
+- Merges all class definitions into a single schema
+- Enables proper decoding of complex nested data structures
 
 #### Supported Field Types
 
@@ -172,6 +203,19 @@ cqviewer-gui
 1. Click **File > Open .cq4 File** or press `Ctrl+O`
 2. Select a `.cq4` file from your filesystem
 3. Messages will load in the table view
+
+### Opening a Folder (Recommended)
+
+Put your `.cq4` data file, `.cq4t` metadata file, and Java class definitions all in one folder, then:
+
+1. Click **Open Folder** button or **File > Open Folder...** or press `Ctrl+Shift+O`
+2. Select the folder
+3. The tool automatically loads:
+   - The `.cq4` data file
+   - The `.cq4t` tailer/metadata file (if present)
+   - All `.java` and `.class` files for schema (including nested classes)
+
+This is the easiest way to work with BINARY_LIGHT encoded data that requires Java class definitions.
 
 ### Searching
 

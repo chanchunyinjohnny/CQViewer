@@ -8,9 +8,10 @@ from pathlib import Path
 from cqviewer.parser.java_parser import (
     parse_java_source, parse_java_class, parse_java_file,
     java_type_to_schema_type, java_fields_to_schema, merge_schemas,
-    JavaField,
+    JavaField, extract_inner_classes, parse_java_source_with_inner_classes,
+    scan_directory_for_java_files, parse_directory, ClassRegistry,
 )
-from cqviewer.parser.schema import Schema
+from cqviewer.parser.schema import Schema, MessageDef, FieldDef
 
 
 class TestJavaTypeMapping:
@@ -228,12 +229,21 @@ class TestMergeSchemas:
     """Tests for merging multiple schemas."""
 
     def test_merge_two_schemas(self):
+        # Create proper MessageDef objects
+        order_def = MessageDef(name="Order", fields=[
+            FieldDef(name="orderId", type="int64"),
+            FieldDef(name="item", type="object"),  # Has nested object
+        ])
+        trade_def = MessageDef(name="Trade", fields=[
+            FieldDef(name="tradeId", type="int64"),
+        ])
+
         schema1 = Schema(
-            messages={"Order": None},
+            messages={"Order": order_def},
             default_message="Order"
         )
         schema2 = Schema(
-            messages={"Trade": None},
+            messages={"Trade": trade_def},
             default_message=None
         )
 
@@ -241,15 +251,29 @@ class TestMergeSchemas:
 
         assert "Order" in merged.messages
         assert "Trade" in merged.messages
+        # Order has nested object, so it should be preferred
         assert merged.default_message == "Order"
 
-    def test_merge_preserves_first_default(self):
-        schema1 = Schema(messages={}, default_message="First")
-        schema2 = Schema(messages={}, default_message="Second")
+    def test_merge_picks_message_with_nested_objects(self):
+        # Main type has a nested object reference
+        main_def = MessageDef(name="Main", fields=[
+            FieldDef(name="header", type="object"),
+            FieldDef(name="data", type="string"),
+        ])
+        # Helper type has no nested objects
+        helper_def = MessageDef(name="Helper", fields=[
+            FieldDef(name="id", type="int64"),
+            FieldDef(name="name", type="string"),
+            FieldDef(name="value", type="float64"),
+        ])
+
+        schema1 = Schema(messages={"Helper": helper_def}, default_message="Helper")
+        schema2 = Schema(messages={"Main": main_def}, default_message="Main")
 
         merged = merge_schemas(schema1, schema2)
 
-        assert merged.default_message == "First"
+        # Main should be picked because it has nested object, even though Helper was first
+        assert merged.default_message == "Main"
 
 
 class TestParseJavaFile:
@@ -335,3 +359,243 @@ class TestEndToEnd:
         assert field_types["price"] == "float64"
         assert field_types["quantity"] == "int32"
         assert field_types["isBuy"] == "bool"
+
+
+class TestClassRegistry:
+    """Tests for ClassRegistry."""
+
+    def test_register_and_get(self):
+        registry = ClassRegistry()
+        schema = Schema(default_message="TestClass")
+
+        registry.register("com.example.TestClass", schema)
+
+        # Should get by fully-qualified name
+        assert registry.get("com.example.TestClass") is schema
+        # Should also get by simple name
+        assert registry.get("TestClass") is schema
+
+    def test_merge_all(self):
+        registry = ClassRegistry()
+        class1_def = MessageDef(name="Class1", fields=[FieldDef(name="id", type="int64")])
+        class2_def = MessageDef(name="Class2", fields=[FieldDef(name="name", type="string")])
+        schema1 = Schema(messages={"Class1": class1_def}, default_message="Class1")
+        schema2 = Schema(messages={"Class2": class2_def}, default_message="Class2")
+
+        registry.register("Class1", schema1)
+        registry.register("Class2", schema2)
+
+        merged = registry.merge_all()
+        assert "Class1" in merged.messages
+        assert "Class2" in merged.messages
+
+
+class TestExtractInnerClasses:
+    """Tests for extracting inner classes from Java source."""
+
+    def test_extract_simple_inner_class(self):
+        java_code = """
+        public class Order {
+            private long orderId;
+
+            public static class Item {
+                private String productId;
+                private int quantity;
+            }
+        }
+        """
+
+        inner_classes = extract_inner_classes(java_code, "Order")
+
+        assert len(inner_classes) == 1
+        assert inner_classes[0][0] == "Item"
+
+    def test_extract_multiple_inner_classes(self):
+        java_code = """
+        public class Order {
+            private long orderId;
+
+            public static class Item {
+                private String productId;
+            }
+
+            public static class Address {
+                private String street;
+                private String city;
+            }
+        }
+        """
+
+        inner_classes = extract_inner_classes(java_code, "Order")
+
+        assert len(inner_classes) == 2
+        names = [ic[0] for ic in inner_classes]
+        assert "Item" in names
+        assert "Address" in names
+
+    def test_does_not_include_outer_class(self):
+        java_code = """
+        public class Outer {
+            private int field;
+        }
+        """
+
+        inner_classes = extract_inner_classes(java_code, "Outer")
+        names = [ic[0] for ic in inner_classes]
+        assert "Outer" not in names
+
+
+class TestParseJavaSourceWithInnerClasses:
+    """Tests for parsing Java source including inner classes."""
+
+    def test_parse_with_inner_class(self):
+        java_code = """
+        public class Order {
+            private long orderId;
+            private Item item;
+
+            public static class Item {
+                private String productId;
+                private int quantity;
+            }
+        }
+        """
+        with tempfile.NamedTemporaryFile(suffix=".java", mode="w", delete=False) as f:
+            f.write(java_code)
+            f.flush()
+
+            main_schema, inner_schemas = parse_java_source_with_inner_classes(f.name)
+
+        # Check main class
+        assert main_schema.default_message == "Order"
+        main_fields = [f.name for f in main_schema.messages["Order"].fields]
+        assert "orderId" in main_fields
+
+        # Check inner class
+        assert len(inner_schemas) == 1
+        inner_schema = inner_schemas[0]
+        assert inner_schema.default_message == "Item"
+        inner_fields = [f.name for f in inner_schema.messages["Item"].fields]
+        assert "productId" in inner_fields
+        assert "quantity" in inner_fields
+
+
+class TestScanDirectory:
+    """Tests for directory scanning."""
+
+    def test_scan_empty_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = scan_directory_for_java_files(tmpdir)
+            assert len(files) == 0
+
+    def test_scan_directory_with_java_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+
+            # Create some Java files
+            (tmppath / "Order.java").write_text("public class Order {}")
+            (tmppath / "Trade.java").write_text("public class Trade {}")
+
+            files = scan_directory_for_java_files(tmpdir)
+
+            assert len(files) == 2
+            names = [f.name for f in files]
+            assert "Order.java" in names
+            assert "Trade.java" in names
+
+    def test_scan_directory_recursive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+
+            # Create nested directory structure
+            subdir = tmppath / "model"
+            subdir.mkdir()
+
+            (tmppath / "Root.java").write_text("public class Root {}")
+            (subdir / "Nested.java").write_text("public class Nested {}")
+
+            files = scan_directory_for_java_files(tmpdir)
+
+            assert len(files) == 2
+            names = [f.name for f in files]
+            assert "Root.java" in names
+            assert "Nested.java" in names
+
+    def test_scan_invalid_directory(self):
+        with pytest.raises(ValueError, match="Not a directory"):
+            scan_directory_for_java_files("/nonexistent/path")
+
+
+class TestParseDirectory:
+    """Tests for parsing an entire directory."""
+
+    def test_parse_directory_single_file(self):
+        java_code = """
+        public class Order {
+            private long orderId;
+            private String symbol;
+        }
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            (tmppath / "Order.java").write_text(java_code)
+
+            schema = parse_directory(tmpdir)
+
+        assert "Order" in schema.messages
+        fields = [f.name for f in schema.messages["Order"].fields]
+        assert "orderId" in fields
+        assert "symbol" in fields
+
+    def test_parse_directory_multiple_files(self):
+        order_code = """
+        public class Order {
+            private long orderId;
+        }
+        """
+        trade_code = """
+        public class Trade {
+            private long tradeId;
+        }
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            (tmppath / "Order.java").write_text(order_code)
+            (tmppath / "Trade.java").write_text(trade_code)
+
+            schema = parse_directory(tmpdir)
+
+        assert "Order" in schema.messages
+        assert "Trade" in schema.messages
+
+    def test_parse_directory_with_inner_classes(self):
+        java_code = """
+        public class Order {
+            private long orderId;
+            private Item item;
+
+            public static class Item {
+                private String productId;
+                private int quantity;
+            }
+        }
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            (tmppath / "Order.java").write_text(java_code)
+
+            schema = parse_directory(tmpdir, include_inner_classes=True)
+
+        # Should have both Order and Item
+        assert "Order" in schema.messages
+        assert "Item" in schema.messages
+
+        # Check Item fields
+        item_fields = [f.name for f in schema.messages["Item"].fields]
+        assert "productId" in item_fields
+        assert "quantity" in item_fields
+
+    def test_parse_directory_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="No .java or .class files found"):
+                parse_directory(tmpdir)

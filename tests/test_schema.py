@@ -303,6 +303,48 @@ class TestBinaryDecoder:
         assert result["required"] == 42
         assert "optional" not in result  # Optional field not present
 
+    def test_decode_nested_object(self):
+        """Test decoding a message with nested object fields."""
+        # Define a schema with a parent message containing a nested child message
+        # Child: HeaderThrift with trackingId (int64), messageId (int64), timestamp (int64)
+        # Parent: Order with header (object -> HeaderThrift), orderId (int64)
+        header_fields = [
+            FieldDef(name="trackingId", type="int64"),
+            FieldDef(name="messageId", type="int64"),
+            FieldDef(name="timestamp", type="int64"),
+        ]
+        header_msg = MessageDef(name="HeaderThrift", fields=header_fields)
+
+        order_fields = [
+            FieldDef(name="header", type="object", nested_type="HeaderThrift"),
+            FieldDef(name="orderId", type="int64"),
+        ]
+        order_msg = MessageDef(name="Order", fields=order_fields)
+
+        schema = Schema(
+            messages={
+                "HeaderThrift": header_msg,
+                "Order": order_msg,
+            },
+            default_message="Order",
+        )
+
+        decoder = BinaryDecoder(schema)
+
+        # Create binary data: header (3 x int64) + orderId (int64)
+        # trackingId=123, messageId=456, timestamp=789, orderId=999
+        data = struct.pack("<q", 123) + struct.pack("<q", 456) + struct.pack("<q", 789) + struct.pack("<q", 999)
+
+        result = decoder.decode(data)
+
+        # The nested header should be decoded as a dict
+        assert "header" in result
+        assert isinstance(result["header"], dict)
+        assert result["header"]["trackingId"] == 123
+        assert result["header"]["messageId"] == 456
+        assert result["header"]["timestamp"] == 789
+        assert result["orderId"] == 999
+
 
 class TestCreateExampleSchema:
     """Tests for create_example_schema function."""

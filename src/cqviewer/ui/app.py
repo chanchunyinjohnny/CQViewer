@@ -96,8 +96,11 @@ class CQViewerApp:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Open .cq4 File...", command=self._open_file, accelerator="Ctrl+O")
+        file_menu.add_command(label="Open Folder...", command=self._open_folder, accelerator="Ctrl+Shift+O")
+        file_menu.add_separator()
         file_menu.add_command(label="Open .cq4t Tailer File...", command=self._open_tailer_file)
-        file_menu.add_command(label="Load Java Schema (.java/.class)...", command=self._load_schema_file)
+        file_menu.add_command(label="Load Schema File (.java/.class)...", command=self._load_schema_file)
+        file_menu.add_separator()
         file_menu.add_command(label="Close File", command=self._close_file)
         file_menu.add_separator()
         file_menu.add_command(label="Export to CSV...", command=self._export_csv, accelerator="Ctrl+E")
@@ -130,7 +133,8 @@ class CQViewerApp:
         toolbar = ttk.Frame(self._root, padding=5)
         toolbar.grid(row=0, column=0, sticky="ew")
 
-        ttk.Button(toolbar, text="Open", command=self._open_any_file).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Open File", command=self._open_any_file).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Open Folder", command=self._open_folder).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Export", command=self._export_csv).pack(side="left", padx=2)
 
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
@@ -180,6 +184,7 @@ class CQViewerApp:
     def _setup_bindings(self) -> None:
         """Set up keyboard bindings."""
         self._root.bind("<Control-o>", lambda e: self._open_file())
+        self._root.bind("<Control-Shift-O>", lambda e: self._open_folder())
         self._root.bind("<Control-e>", lambda e: self._export_csv())
         self._root.bind("<Control-q>", lambda e: self._root.quit())
         self._root.bind("<F5>", lambda e: self._refresh())
@@ -365,6 +370,158 @@ class CQViewerApp:
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load schema file:\n{e}")
+
+    def _open_folder(self) -> None:
+        """Open a folder containing .cq4, .cq4t, and Java class files."""
+        folder_path = filedialog.askdirectory(
+            title="Select Folder with CQ4 Data and Class Definitions",
+            mustexist=True,
+        )
+
+        if not folder_path:
+            return
+
+        self._open_folder_path(folder_path)
+
+    def _open_folder_path(self, folder_path: str) -> None:
+        """Open a folder and load all supported files from it.
+
+        Loads:
+        - .cq4 data file (required, uses first found)
+        - .cq4t tailer/metadata file (optional)
+        - .java and .class files for schema (optional)
+        """
+        folder = Path(folder_path)
+
+        try:
+            self._status_bar.config(text=f"Scanning {folder_path}...")
+            self._root.update()
+
+            # Find all relevant files
+            cq4_files = list(folder.glob("*.cq4"))
+            cq4t_files = list(folder.glob("*.cq4t"))
+            java_files = list(folder.rglob("*.java")) + list(folder.rglob("*.class"))
+
+            if not cq4_files:
+                messagebox.showwarning(
+                    "No Data File",
+                    f"No .cq4 file found in:\n{folder_path}\n\n"
+                    "Please select a folder containing a .cq4 data file."
+                )
+                self._status_bar.config(text="Ready")
+                return
+
+            # Use the first .cq4 file (or let user choose if multiple)
+            if len(cq4_files) > 1:
+                # Show selection dialog
+                cq4_file = self._choose_file(cq4_files, "Multiple .cq4 files found")
+                if not cq4_file:
+                    return
+            else:
+                cq4_file = cq4_files[0]
+
+            # Load Java schema first (if any)
+            schema_info = ""
+            if java_files:
+                self._status_bar.config(text=f"Loading {len(java_files)} Java class files...")
+                self._root.update()
+                try:
+                    self._schema = self._message_service.load_schema_directory(folder_path)
+                    self._schema_file = folder_path
+                    schema_info = f"{len(self._schema.messages)} types"
+                except Exception as e:
+                    # Schema loading failed, continue without it
+                    schema_info = f"failed: {e}"
+
+            # Load tailer metadata (if any)
+            tailer_info = ""
+            if cq4t_files:
+                # Use first .cq4t file
+                cq4t_file = cq4t_files[0]
+                try:
+                    self._tailer_file = str(cq4t_file)
+                    self._tailer_metadata = read_tailer_metadata(str(cq4t_file))
+                    wire_type = self._tailer_metadata.get('wireType', 'unknown')
+                    tailer_info = f"Wire: {wire_type}"
+                except Exception:
+                    pass
+
+            # Load the .cq4 file
+            self._status_bar.config(text=f"Loading {cq4_file.name}...")
+            self._root.update()
+
+            queue_info = self._message_service.load_file(
+                str(cq4_file), include_metadata=self._show_metadata_var.get()
+            )
+
+            self._all_messages = self._message_service.get_all_messages()
+            self._filtered_messages = self._all_messages.copy()
+
+            # Update UI
+            self._file_label.config(text=str(queue_info))
+            self._message_table.set_messages(self._filtered_messages)
+
+            # Update filter options
+            types = self._message_service.get_unique_types()
+            fields = self._message_service.get_all_field_names()
+            self._filter_bar.set_types(types)
+            self._filter_bar.set_fields(fields)
+
+            # Update columns
+            if self._all_messages:
+                self._update_table_columns()
+
+            # Build status message
+            status_parts = [f"Loaded {queue_info.message_count} messages from {cq4_file.name}"]
+            if schema_info:
+                status_parts.append(f"Schema: {schema_info}")
+            if tailer_info:
+                status_parts.append(tailer_info)
+
+            self._status_bar.config(text=" | ".join(status_parts))
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open folder:\n{e}")
+            self._status_bar.config(text="Error loading folder")
+
+    def _choose_file(self, files: list[Path], title: str) -> Path | None:
+        """Show a dialog to choose from multiple files."""
+        # Create a simple selection dialog
+        dialog = tk.Toplevel(self._root)
+        dialog.title(title)
+        dialog.geometry("400x300")
+        dialog.transient(self._root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="Select a file:").pack(pady=10)
+
+        listbox = tk.Listbox(dialog, selectmode="single")
+        listbox.pack(fill="both", expand=True, padx=10, pady=5)
+
+        for f in files:
+            listbox.insert("end", f.name)
+
+        if files:
+            listbox.selection_set(0)
+
+        selected_file = [None]
+
+        def on_ok():
+            sel = listbox.curselection()
+            if sel:
+                selected_file[0] = files[sel[0]]
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side="left", padx=5)
+
+        dialog.wait_window()
+        return selected_file[0]
 
     def _update_table_columns(self) -> None:
         """Update table columns based on loaded messages."""

@@ -57,6 +57,7 @@ class FieldDef:
     size: int = 0  # For padding or fixed-size fields
     optional: bool = False
     field_id: int | None = None  # Thrift field ID (1-based)
+    nested_type: str | None = None  # For object fields, the Java type name to look up
 
 
 @dataclass
@@ -336,24 +337,156 @@ class BinaryDecoder:
             size = field_def.size or 1
             return None, size
 
-        # Nested object - try to detect boundaries
-        # Chronicle BINARY_LIGHT nested objects don't have length prefixes
-        # If a size is specified, skip that many bytes
+        # Nested object - try to decode using schema
         if field_type in ("object", "struct", "nested"):
+            nested_type_name = field_def.nested_type
+            nested_msg = None
+
+            # Try to find the nested message definition in schema
+            if nested_type_name:
+                nested_msg = self.schema.get_message(nested_type_name)
+
+            if nested_msg:
+                # First try to calculate fixed size (works for messages with only fixed fields)
+                nested_size = self._calculate_nested_object_size(nested_msg)
+                if nested_size > 0 and pos + nested_size <= len(data):
+                    # Fixed-size nested object - decode it
+                    nested_result, bytes_consumed = self._decode_nested_inline(data, pos, nested_msg)
+                    if bytes_consumed > 0 and "_nested_error" not in nested_result:
+                        return nested_result, bytes_consumed
+
+                # If fixed-size failed, try to detect size and return raw hex with field names
+                detected_size = self._detect_nested_object_size(data, pos)
+                if detected_size > 0:
+                    # Return the raw bytes in a dict with a hint about the nested type
+                    nested_hex = data[pos:pos + detected_size].hex()
+                    return {
+                        "_type": nested_type_name,
+                        "_bytes": detected_size,
+                        "_hex": nested_hex[:64] + ("..." if len(nested_hex) > 64 else ""),
+                    }, detected_size
+
+            # Fall back to size hint
             size = field_def.size
             if size:
                 return f"<nested:{size}bytes>", size
-            # Try to detect the end of the nested object by looking for
-            # a valid string length prefix (a byte that matches the pattern
-            # of being followed by ASCII printable characters)
+
+            # Try to detect the end of the nested object
             detected_size = self._detect_nested_object_size(data, pos)
             if detected_size > 0:
                 return f"<nested:{detected_size}bytes>", detected_size
+
             # Without explicit size and no detection, return raw hex
-            remaining = min(32, len(data) - pos)  # Show first 32 bytes
+            remaining = min(32, len(data) - pos)
             return f"<nested:0x{data[pos:pos+remaining].hex()}>", remaining
 
         raise ValueError(f"Unknown type: {field_type}")
+
+    def _calculate_nested_object_size(self, msg_def: MessageDef) -> int:
+        """Calculate the expected byte size of a message based on its fields.
+
+        Only works for messages with fixed-size fields. Returns 0 if the message
+        contains variable-length fields (strings, bytes, nested objects without size).
+        """
+        total_size = 0
+
+        for field_def in msg_def.fields:
+            field_type = field_def.type.lower()
+
+            if field_type in self.TYPE_SIZES:
+                total_size += self.TYPE_SIZES[field_type]
+            elif field_type in ("string", "bytes"):
+                # Variable length - can't calculate size
+                return 0
+            elif field_type in ("object", "struct", "nested"):
+                if field_def.size:
+                    total_size += field_def.size
+                elif field_def.nested_type:
+                    # Try to calculate recursively
+                    nested_msg = self.schema.get_message(field_def.nested_type)
+                    if nested_msg:
+                        nested_size = self._calculate_nested_object_size(nested_msg)
+                        if nested_size > 0:
+                            total_size += nested_size
+                        else:
+                            return 0  # Can't calculate
+                    else:
+                        return 0
+                else:
+                    return 0
+            elif field_type == "padding":
+                total_size += field_def.size or 1
+
+        return total_size
+
+    def _decode_nested_object(self, data: bytes, msg_def: MessageDef) -> dict[str, Any]:
+        """Decode a nested object using its message definition.
+
+        Args:
+            data: Binary data for the nested object
+            msg_def: Message definition for the nested type
+
+        Returns:
+            Dictionary of decoded field values
+        """
+        result = {}
+        pos = 0
+
+        for field_def in msg_def.fields:
+            if pos >= len(data):
+                if field_def.optional:
+                    continue
+                result[field_def.name] = None
+                continue
+
+            try:
+                value, bytes_read = self._decode_field(data, pos, field_def)
+                result[field_def.name] = value
+                pos += bytes_read
+            except Exception as e:
+                result[field_def.name] = f"<decode_error: {e}>"
+                break
+
+        return result
+
+    def _decode_nested_inline(
+        self, data: bytes, pos: int, msg_def: MessageDef
+    ) -> tuple[dict[str, Any], int]:
+        """Decode a nested object inline, consuming bytes from the parent data stream.
+
+        Unlike _decode_nested_object, this method works directly on the parent data
+        at the given position and returns both the decoded result and the total
+        number of bytes consumed. This allows decoding nested objects with
+        variable-length fields.
+
+        Args:
+            data: Full binary data (from parent)
+            pos: Starting position in data
+            msg_def: Message definition for the nested type
+
+        Returns:
+            Tuple of (decoded dict, bytes consumed)
+        """
+        result = {}
+        current_pos = pos
+
+        try:
+            for field_def in msg_def.fields:
+                if current_pos >= len(data):
+                    if field_def.optional:
+                        continue
+                    result[field_def.name] = None
+                    continue
+
+                value, bytes_read = self._decode_field(data, current_pos, field_def)
+                result[field_def.name] = value
+                current_pos += bytes_read
+        except Exception as e:
+            # If decoding fails, return what we have so far
+            result["_nested_error"] = str(e)
+
+        bytes_consumed = current_pos - pos
+        return result, bytes_consumed
 
     def _detect_nested_object_size(self, data: bytes, pos: int) -> int:
         """Try to detect the size of a nested object.

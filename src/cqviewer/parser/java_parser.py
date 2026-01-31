@@ -3,6 +3,7 @@
 This module can read either:
 - .java source files: Parses field declarations from source code
 - .class bytecode files: Reads field info from compiled class files
+- Directories: Recursively scans for all .java and .class files
 
 Supports auto-detection of encoding format:
 - Thrift: Detected by org.apache.thrift.TBase or TField patterns
@@ -19,6 +20,38 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .schema import Schema, MessageDef, FieldDef, ENCODING_BINARY, ENCODING_THRIFT, ENCODING_SBE
+
+
+@dataclass
+class ClassRegistry:
+    """Registry of all parsed Java classes, including nested classes.
+
+    Maps fully-qualified class names to their schemas for nested type resolution.
+    """
+    schemas: dict[str, Schema] = field(default_factory=dict)
+
+    def register(self, class_name: str, schema: Schema) -> None:
+        """Register a class schema."""
+        self.schemas[class_name] = schema
+        # Also register without package prefix for easier lookup
+        simple_name = class_name.split(".")[-1]
+        if simple_name not in self.schemas:
+            self.schemas[simple_name] = schema
+
+    def get(self, class_name: str) -> Schema | None:
+        """Get schema by class name (fully-qualified or simple)."""
+        # Try exact match first
+        if class_name in self.schemas:
+            return self.schemas[class_name]
+        # Try simple name
+        simple_name = class_name.split(".")[-1]
+        return self.schemas.get(simple_name)
+
+    def merge_all(self) -> Schema:
+        """Merge all registered schemas into one."""
+        if not self.schemas:
+            return Schema()
+        return merge_schemas(*self.schemas.values())
 
 
 # Java type to schema type mapping
@@ -158,16 +191,42 @@ def parse_java_source(filepath: str | Path) -> tuple[str | None, list[JavaField]
             i += 1
         return ''.join(result)
 
-    # Also remove inner classes and enums
-    def remove_inner_classes(text: str) -> str:
+    # Remove inner classes and enums from the body for field extraction
+    # (we'll parse inner classes separately)
+    def remove_inner_classes_for_fields(text: str) -> str:
         # Remove enum blocks
         text = re.sub(r'\benum\s+\w+\s*\{[^}]*\}', '', text, flags=re.DOTALL)
-        # Remove inner class blocks
-        text = re.sub(r'\bclass\s+\w+[^{]*\{[^}]*\}', '', text, flags=re.DOTALL)
-        return text
+        # Remove inner class blocks (simple non-nested case)
+        # Use a more careful approach to avoid removing too much
+        result = []
+        i = 0
+        while i < len(text):
+            # Look for inner class keyword
+            inner_match = re.match(r'\b(public|private|protected|static)?\s*(class|interface)\s+(\w+)', text[i:])
+            if inner_match:
+                # Skip to the end of this inner class body
+                j = i + inner_match.end()
+                # Find the opening brace
+                while j < len(text) and text[j] != '{':
+                    j += 1
+                if j < len(text):
+                    # Skip the matched inner class body
+                    depth = 1
+                    j += 1
+                    while j < len(text) and depth > 0:
+                        if text[j] == '{':
+                            depth += 1
+                        elif text[j] == '}':
+                            depth -= 1
+                        j += 1
+                    i = j
+                    continue
+            result.append(text[i])
+            i += 1
+        return ''.join(result)
 
     cleaned_body = remove_method_bodies(class_body)
-    cleaned_body = remove_inner_classes(cleaned_body)
+    cleaned_body = remove_inner_classes_for_fields(cleaned_body)
 
     # Now extract field declarations from cleaned class body
     # Look for: [modifiers] [annotations] type fieldName [= value];
@@ -577,10 +636,14 @@ def java_fields_to_schema(
 
         schema_type = java_type_to_schema_type(field.java_type)
 
+        # For object types, store the original Java type name for nested decoding
+        nested_type = field.java_type if schema_type == "object" else None
+
         schema_fields.append(FieldDef(
             name=field.name,
             type=schema_type,
             field_id=field.field_id,
+            nested_type=nested_type,
         ))
 
     message_def = MessageDef(name=class_name, fields=schema_fields)
@@ -630,6 +693,9 @@ def parse_java_file(filepath: str | Path, encoding: str | None = None) -> Schema
 def merge_schemas(*schemas: Schema) -> Schema:
     """Merge multiple schemas into one.
 
+    Picks the message with nested object references as the default,
+    as it's likely the main message type.
+
     Args:
         *schemas: Schema objects to merge
 
@@ -637,10 +703,288 @@ def merge_schemas(*schemas: Schema) -> Schema:
         Merged Schema with all message types
     """
     merged = Schema()
+    best_default = None
+    best_score = -1
 
     for schema in schemas:
         merged.messages.update(schema.messages)
-        if schema.default_message and not merged.default_message:
-            merged.default_message = schema.default_message
+        # Preserve encoding from first non-default encoding
+        if schema.encoding and schema.encoding != ENCODING_BINARY:
+            merged.encoding = schema.encoding
+        elif not merged.encoding:
+            merged.encoding = schema.encoding
 
+    # Pick the best default message:
+    # - Prefer messages with nested object fields (they reference other types)
+    # - Prefer messages with more fields (likely the main type, not a nested helper)
+    for name, msg_def in merged.messages.items():
+        score = len(msg_def.fields)
+        has_nested = any(f.type == "object" for f in msg_def.fields)
+        if has_nested:
+            score += 100  # Strongly prefer types that reference other types
+        if score > best_score:
+            best_score = score
+            best_default = name
+
+    merged.default_message = best_default
     return merged
+
+
+def extract_inner_classes(content: str, outer_class: str) -> list[tuple[str, str]]:
+    """Extract inner class definitions from Java source.
+
+    Args:
+        content: Java source code content
+        outer_class: Name of the outer class
+
+    Returns:
+        List of (inner_class_name, inner_class_body) tuples
+    """
+    inner_classes = []
+
+    # Remove comments first
+    content_no_comments = re.sub(r"//.*$", "", content, flags=re.MULTILINE)
+    content_no_comments = re.sub(r"/\*.*?\*/", "", content_no_comments, flags=re.DOTALL)
+
+    # Pattern to find inner class declarations
+    inner_pattern = re.compile(
+        r'\b(public|private|protected|static)?\s*(static)?\s*class\s+(\w+)\s*'
+        r'(?:extends\s+\w+)?\s*(?:implements\s+[\w,\s]+)?\s*\{',
+        re.MULTILINE
+    )
+
+    # Find all potential inner class starts
+    for match in inner_pattern.finditer(content_no_comments):
+        inner_name = match.group(3)
+        # Skip if this is the outer class itself
+        if inner_name == outer_class:
+            continue
+
+        # Extract the body
+        start_brace = match.end() - 1
+        depth = 1
+        pos = start_brace + 1
+        while pos < len(content_no_comments) and depth > 0:
+            if content_no_comments[pos] == '{':
+                depth += 1
+            elif content_no_comments[pos] == '}':
+                depth -= 1
+            pos += 1
+
+        body = content_no_comments[start_brace + 1:pos - 1]
+        inner_classes.append((inner_name, body))
+
+    return inner_classes
+
+
+def parse_inner_class_fields(class_name: str, body: str) -> list[JavaField]:
+    """Parse field declarations from an inner class body.
+
+    Args:
+        class_name: Name of the inner class
+        body: Class body content
+
+    Returns:
+        List of JavaField objects
+    """
+    fields = []
+
+    # Remove method bodies
+    def remove_method_bodies(text: str) -> str:
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == ')':
+                j = i + 1
+                while j < len(text) and text[j] in ' \t\n\r':
+                    j += 1
+                if j < len(text) - 6 and text[j:j+6] == 'throws':
+                    while j < len(text) and text[j] != '{':
+                        j += 1
+                if j < len(text) and text[j] == '{':
+                    result.append(text[i])
+                    depth = 1
+                    j += 1
+                    while j < len(text) and depth > 0:
+                        if text[j] == '{':
+                            depth += 1
+                        elif text[j] == '}':
+                            depth -= 1
+                        j += 1
+                    i = j
+                    continue
+            result.append(text[i])
+            i += 1
+        return ''.join(result)
+
+    cleaned_body = remove_method_bodies(body)
+
+    field_pattern = re.compile(
+        r"""
+        ^\s*
+        (public|private|protected)
+        ((?:\s+(?:static|final|volatile|transient))*)
+        \s+
+        (?:@[\w.]+(?:\([^)]*\))?\s+)*
+        ([\w\[\]<>,.]+)
+        \s+
+        (\w+)
+        \s*
+        (?:=[^;]*)?
+        \s*;
+        """,
+        re.VERBOSE | re.MULTILINE
+    )
+
+    seen_fields = set()
+    for match in field_pattern.finditer(cleaned_body):
+        access = match.group(1) or ""
+        other_mods = match.group(2) or ""
+        java_type = match.group(3).strip()
+        name = match.group(4)
+
+        if name in seen_fields:
+            continue
+        seen_fields.add(name)
+
+        modifiers = access + other_mods
+        is_static = "static" in modifiers
+        is_transient = "transient" in modifiers
+
+        java_type = re.sub(r"<.*>", "", java_type)
+        java_type = java_type.strip().split(".")[-1].strip()
+
+        if not java_type or java_type in ("void", "class", "interface", "enum"):
+            continue
+
+        fields.append(JavaField(
+            name=name,
+            java_type=java_type,
+            is_static=is_static,
+            is_transient=is_transient,
+        ))
+
+    return fields
+
+
+def parse_java_source_with_inner_classes(
+    filepath: str | Path,
+    encoding: str | None = None
+) -> tuple[Schema, list[Schema]]:
+    """Parse a .java source file including inner classes.
+
+    Args:
+        filepath: Path to .java file
+        encoding: Force specific encoding
+
+    Returns:
+        Tuple of (main_schema, list_of_inner_class_schemas)
+    """
+    filepath = Path(filepath)
+    content = filepath.read_text(encoding="utf-8")
+
+    # Parse main class
+    class_name, fields, detected_encoding = parse_java_source(filepath)
+    if not class_name:
+        class_name = filepath.stem
+
+    final_encoding = encoding if encoding else detected_encoding
+    main_schema = java_fields_to_schema(class_name, fields, encoding=final_encoding)
+
+    # Extract and parse inner classes
+    inner_schemas = []
+    inner_classes = extract_inner_classes(content, class_name)
+
+    for inner_name, inner_body in inner_classes:
+        inner_fields = parse_inner_class_fields(inner_name, inner_body)
+        if inner_fields:  # Only add if there are fields
+            inner_schema = java_fields_to_schema(
+                inner_name,
+                inner_fields,
+                encoding=final_encoding
+            )
+            inner_schemas.append(inner_schema)
+
+    return main_schema, inner_schemas
+
+
+def scan_directory_for_java_files(directory: str | Path) -> list[Path]:
+    """Recursively scan a directory for .java and .class files.
+
+    Args:
+        directory: Path to directory
+
+    Returns:
+        List of paths to Java files
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise ValueError(f"Not a directory: {directory}")
+
+    java_files = []
+
+    # Recursively find all .java and .class files
+    for ext in ("*.java", "*.class"):
+        java_files.extend(directory.rglob(ext))
+
+    # Sort by name for consistent ordering
+    return sorted(java_files)
+
+
+def parse_directory(
+    directory: str | Path,
+    encoding: str | None = None,
+    include_inner_classes: bool = True
+) -> Schema:
+    """Parse all Java files in a directory and merge into a single schema.
+
+    This is useful when your data structures reference multiple classes,
+    including nested/inner classes. The directory can contain your entire
+    model package.
+
+    Args:
+        directory: Path to directory containing Java files
+        encoding: Force specific encoding (auto-detected if None)
+        include_inner_classes: Whether to extract inner classes
+
+    Returns:
+        Merged Schema with all discovered message types
+    """
+    directory = Path(directory)
+    java_files = scan_directory_for_java_files(directory)
+
+    if not java_files:
+        raise ValueError(f"No .java or .class files found in {directory}")
+
+    all_schemas = []
+    registry = ClassRegistry()
+
+    for filepath in java_files:
+        try:
+            if filepath.suffix == ".java" and include_inner_classes:
+                # Parse with inner class extraction
+                main_schema, inner_schemas = parse_java_source_with_inner_classes(
+                    filepath, encoding=encoding
+                )
+                all_schemas.append(main_schema)
+                registry.register(main_schema.default_message or filepath.stem, main_schema)
+
+                for inner_schema in inner_schemas:
+                    all_schemas.append(inner_schema)
+                    if inner_schema.default_message:
+                        registry.register(inner_schema.default_message, inner_schema)
+            else:
+                # Standard parsing
+                schema = parse_java_file(filepath, encoding=encoding)
+                all_schemas.append(schema)
+                if schema.default_message:
+                    registry.register(schema.default_message, schema)
+        except Exception as e:
+            # Skip files that fail to parse, but continue with others
+            print(f"Warning: Failed to parse {filepath}: {e}")
+            continue
+
+    if not all_schemas:
+        raise ValueError(f"No valid Java files could be parsed in {directory}")
+
+    return merge_schemas(*all_schemas)

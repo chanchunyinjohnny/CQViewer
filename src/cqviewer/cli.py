@@ -112,7 +112,7 @@ def format_table(rows: list[dict], columns: list[str], max_width: int = 40) -> s
 
 
 def load_schema_if_provided(args: argparse.Namespace, service: MessageService):
-    """Load Java schema file(s) if provided in args.
+    """Load Java schema file(s) or directory if provided in args.
 
     Args:
         args: Parsed command line arguments
@@ -121,6 +121,19 @@ def load_schema_if_provided(args: argparse.Namespace, service: MessageService):
     Returns:
         Loaded Schema or None
     """
+    # Get encoding override if provided
+    encoding = getattr(args, "encoding", None)
+
+    # Check for directory mode first
+    schema_dir = getattr(args, "schema_dir", None)
+    if schema_dir:
+        try:
+            return service.load_schema_directory(schema_dir, encoding=encoding)
+        except Exception as e:
+            print(f"Warning: Failed to load schema from directory: {e}", file=sys.stderr)
+            return None
+
+    # Check for individual schema files
     if not hasattr(args, "schema") or not args.schema:
         return None
 
@@ -132,9 +145,6 @@ def load_schema_if_provided(args: argparse.Namespace, service: MessageService):
     if not java_files:
         print("Warning: No valid Java schema files provided (.java or .class)", file=sys.stderr)
         return None
-
-    # Get encoding override if provided
-    encoding = getattr(args, "encoding", None)
 
     try:
         if len(java_files) == 1:
@@ -492,8 +502,89 @@ def cmd_types(args: argparse.Namespace) -> int:
         service.close()
 
 
+def cmd_open(args: argparse.Namespace) -> int:
+    """Open a folder containing .cq4, .cq4t, and Java class files."""
+    from pathlib import Path
+
+    folder = Path(args.folder)
+    if not folder.is_dir():
+        print(f"Error: Not a directory: {folder}", file=sys.stderr)
+        return 1
+
+    # Find all relevant files
+    cq4_files = list(folder.glob("*.cq4"))
+    cq4t_files = list(folder.glob("*.cq4t"))
+    java_files = list(folder.rglob("*.java")) + list(folder.rglob("*.class"))
+
+    if not cq4_files:
+        print(f"Error: No .cq4 file found in {folder}", file=sys.stderr)
+        return 1
+
+    # Report what we found
+    print(f"Folder: {folder}")
+    print(f"Found: {len(cq4_files)} .cq4, {len(cq4t_files)} .cq4t, {len(java_files)} Java files")
+
+    # Use first .cq4 file (or specified one)
+    cq4_file = cq4_files[0]
+    if len(cq4_files) > 1:
+        print(f"\nMultiple .cq4 files found, using: {cq4_file.name}")
+        for f in cq4_files:
+            print(f"  - {f.name}")
+
+    service = MessageService()
+
+    try:
+        # Load Java schema first (if any)
+        encoding = getattr(args, "encoding", None)
+        if java_files:
+            try:
+                schema = service.load_schema_directory(str(folder), encoding=encoding)
+                print(f"\nSchema: {len(schema.messages)} message types loaded")
+                for name in sorted(schema.messages.keys())[:10]:
+                    msg_def = schema.messages[name]
+                    print(f"  {name}: {len(msg_def.fields)} fields")
+                if len(schema.messages) > 10:
+                    print(f"  ... and {len(schema.messages) - 10} more")
+            except Exception as e:
+                print(f"\nWarning: Failed to load schema: {e}", file=sys.stderr)
+
+        # Load tailer metadata (if any)
+        if cq4t_files:
+            cq4t_file = cq4t_files[0]
+            tailer_meta = read_tailer_metadata(str(cq4t_file))
+            if tailer_meta:
+                print(f"\nTailer: {cq4t_file.name}")
+                if "wireType" in tailer_meta:
+                    print(f"  Wire Type: {tailer_meta['wireType']}")
+
+        # Load the .cq4 file
+        info = service.load_file(str(cq4_file), include_metadata=args.metadata)
+        print(f"\nData File: {cq4_file.name}")
+        print(f"Size: {info.file_size_str}")
+        print(f"Messages: {info.message_count}")
+
+        # Show type summary
+        types = service.get_unique_types()
+        if types:
+            print(f"\nMessage Types ({len(types)}):")
+            messages = service.get_all_messages()
+            for t in types[:10]:
+                count = sum(1 for m in messages if m.type_hint == t)
+                print(f"  {t}: {count}")
+            if len(types) > 10:
+                print(f"  ... and {len(types) - 10} more")
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        service.close()
+
+
 def cmd_schema(args: argparse.Namespace) -> int:
-    """Parse Java file and show extracted schema."""
+    """Parse Java file or directory and show extracted schema."""
     if args.parse:
         # Parse a Java file and show the extracted schema
         try:
@@ -509,24 +600,44 @@ def cmd_schema(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"Error parsing Java file: {e}", file=sys.stderr)
             return 1
+    elif args.scan_dir:
+        # Scan a directory and show all discovered classes
+        try:
+            from .parser.java_parser import parse_directory
+            schema = parse_directory(args.scan_dir)
+            print(f"Scanned directory: {args.scan_dir}")
+            print(f"Found {len(schema.messages)} message types:")
+            for name, msg_def in sorted(schema.messages.items()):
+                field_names = ", ".join(f.name for f in msg_def.fields[:5])
+                if len(msg_def.fields) > 5:
+                    field_names += ", ..."
+                print(f"  {name}: {len(msg_def.fields)} fields ({field_names})")
+
+        except Exception as e:
+            print(f"Error scanning directory: {e}", file=sys.stderr)
+            return 1
     else:
         # Print usage info
         print("Schema Support for Binary Message Decoding")
-        print("=" * 50)
+        print("=" * 60)
         print("\nSupported encoding formats (auto-detected):")
         print("  binary  - Chronicle's simple sequential binary")
         print("  thrift  - Apache Thrift TCompactProtocol")
         print("  sbe     - Simple Binary Encoding")
-        print("\nUse Java source or class file directly:")
+        print("\nSingle file mode:")
         print("  cqviewer list data.cq4 -S MyMessage.java")
         print("  cqviewer list data.cq4 -S MyMessage.class")
         print("  cqviewer list data.cq4 -S Order.java -S Trade.java")
+        print("\nDirectory mode (loads all classes including nested):")
+        print("  cqviewer list data.cq4 -D ./src/main/java/com/example/model/")
+        print("  cqviewer list data.cq4 -D ./target/classes/com/example/model/")
         print("\nForce specific encoding:")
         print("  cqviewer list data.cq4 -S MyThrift.java -E thrift")
-        print("  cqviewer list data.cq4 -S MySbe.java -E sbe")
-        print("\nParse Java file to see extracted fields:")
+        print("  cqviewer list data.cq4 -D ./models/ -E sbe")
+        print("\nParse and inspect schema:")
         print("  cqviewer schema --parse MyMessage.java")
-        print("\n" + "=" * 50)
+        print("  cqviewer schema --scan-dir ./src/main/java/com/example/model/")
+        print("\n" + "=" * 60)
         print("\nSupported Java field types:")
         print("  byte, short, int, long       - integers")
         print("  float, double                - floating point")
@@ -534,6 +645,11 @@ def cmd_schema(args: argparse.Namespace) -> int:
         print("  String                       - string")
         print("  byte[]                       - binary data")
         print("\nNote: static and transient fields are excluded.")
+        print("\nDirectory mode benefits:")
+        print("  - Automatically discovers all Java classes")
+        print("  - Extracts inner/nested classes from .java files")
+        print("  - Merges all class definitions into one schema")
+        print("  - Enables decoding of complex nested data structures")
 
     return 0
 
@@ -562,6 +678,10 @@ def main(argv: list[str] | None = None) -> int:
             help="Java schema file (.java or .class) for decoding BINARY_LIGHT messages. Can be specified multiple times."
         )
         p.add_argument(
+            "-D", "--schema-dir", metavar="DIR",
+            help="Directory containing Java class files. Recursively loads all .java and .class files, including inner classes."
+        )
+        p.add_argument(
             "-E", "--encoding", choices=["binary", "thrift", "sbe"],
             help="Force encoding format (auto-detected from Java file if not specified)"
         )
@@ -569,6 +689,22 @@ def main(argv: list[str] | None = None) -> int:
             "-m", "--metadata", action="store_true",
             help="Include metadata messages"
         )
+
+    # open command (folder mode)
+    open_parser = subparsers.add_parser(
+        "open",
+        help="Open a folder containing .cq4, .cq4t, and Java class files"
+    )
+    open_parser.add_argument("folder", help="Path to folder")
+    open_parser.add_argument(
+        "-E", "--encoding", choices=["binary", "thrift", "sbe"],
+        help="Force encoding format for Java schema"
+    )
+    open_parser.add_argument(
+        "-m", "--metadata", action="store_true",
+        help="Include metadata messages"
+    )
+    open_parser.set_defaults(func=cmd_open)
 
     # info command
     info_parser = subparsers.add_parser("info", help="Show file information")
@@ -673,11 +809,15 @@ def main(argv: list[str] | None = None) -> int:
     # schema command
     schema_parser = subparsers.add_parser(
         "schema",
-        help="Parse Java file and show extracted schema"
+        help="Parse Java file or directory and show extracted schema"
     )
     schema_parser.add_argument(
         "--parse", metavar="FILE",
         help="Parse a .java or .class file and show extracted fields"
+    )
+    schema_parser.add_argument(
+        "--scan-dir", metavar="DIR",
+        help="Scan a directory for Java files and show all discovered classes"
     )
     schema_parser.set_defaults(func=cmd_schema)
 

@@ -5,7 +5,7 @@ from typing import Iterator
 
 from ..parser.cq4_reader import CQ4Reader, Excerpt
 from ..parser.schema import Schema, BinaryDecoder
-from ..parser.java_parser import parse_java_file, merge_schemas
+from ..parser.java_parser import parse_java_file, merge_schemas, parse_directory
 from ..models.message import Message
 from ..models.queue_info import QueueInfo
 
@@ -83,6 +83,47 @@ class MessageService:
         merged = merge_schemas(*schemas)
         self.set_schema(merged)
         return merged
+
+    def load_schema_directory(
+        self,
+        directory: str | Path,
+        encoding: str | None = None,
+        include_inner_classes: bool = True
+    ) -> Schema:
+        """Load schema from all Java files in a directory.
+
+        Recursively scans the directory for .java and .class files,
+        parses them (including inner classes), and merges into a single schema.
+
+        This is useful when:
+        - Your data structures reference multiple classes
+        - You have nested/inner classes that need to be decoded
+        - You want to load an entire model package at once
+
+        Args:
+            directory: Path to directory containing Java files
+            encoding: Force specific encoding (auto-detected if None)
+            include_inner_classes: Whether to extract inner classes from .java files
+
+        Returns:
+            Merged Schema object with all message types
+
+        Raises:
+            ValueError: If directory doesn't exist or contains no valid Java files
+        """
+        directory = Path(directory)
+        if not directory.exists():
+            raise ValueError(f"Directory not found: {directory}")
+        if not directory.is_dir():
+            raise ValueError(f"Not a directory: {directory}")
+
+        schema = parse_directory(
+            directory,
+            encoding=encoding,
+            include_inner_classes=include_inner_classes
+        )
+        self.set_schema(schema)
+        return schema
 
     def load_file(
         self,
@@ -185,6 +226,14 @@ class MessageService:
                                 fields_dict["_original_hex"] = original_raw
                             if original_len:
                                 fields_dict["_original_length"] = original_len
+
+                            # Set type_hint from schema if not already set
+                            if not type_hint and self._schema:
+                                # Use the message type we decoded with, or the default
+                                if msg_type and msg_type in self._schema.messages:
+                                    type_hint = msg_type
+                                elif self._schema.default_message:
+                                    type_hint = self._schema.default_message
                     except Exception:
                         pass  # Keep original fields on decode error
 
