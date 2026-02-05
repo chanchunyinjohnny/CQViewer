@@ -39,14 +39,14 @@ Add automated tests to verify functionality.
 ## Environment Setup
 
 ```bash
-source .venv/bin/activate
+# Install dependencies (use company conda environment)
 pip install -r requirements-company.txt
 
 # CLI
 python run_cli.py ./data/
 
 # Web UI
-streamlit run run_ui.py
+python run_ui.py
 ```
 
 ## Python Version

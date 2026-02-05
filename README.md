@@ -25,18 +25,7 @@ A Python tool for inspecting and exporting Chronicle Queue (.cq4) data files.
 git clone <repo-url>
 cd CQViewer
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On macOS/Linux
-
-# Install dependencies
-pip install -r requirements-company.txt
-```
-
-On Windows (PowerShell):
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+# Install dependencies (in your Python/conda environment)
 pip install -r requirements-company.txt
 ```
 
@@ -73,12 +62,12 @@ python run_cli.py ./data/ --show 5           # Show message at index 5
 Run the Streamlit web interface:
 
 ```bash
-streamlit run run_ui.py
+python run_ui.py
 ```
 
 Or with a specific port:
 ```bash
-streamlit run run_ui.py --server.port 8501
+python run_ui.py -- --server.port 8501
 ```
 
 ### Features
