@@ -11,8 +11,13 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-gui = [
-    "ttkbootstrap>=1.10.0",
+ui = [
+    "streamlit>=1.30",
+    "pandas>=2.1",
+]
+cli = [
+    "rich",
+    "tabulate",
 ]
 dev = [
     "pytest>=8.0",
@@ -20,7 +25,6 @@ dev = [
 
 [project.scripts]
 cqviewer = "cqviewer.cli:main"
-cqviewer-gui = "cqviewer.ui.app:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

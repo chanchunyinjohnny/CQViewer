@@ -13,273 +13,91 @@ A Python tool for inspecting and exporting Chronicle Queue (.cq4) data files.
 ## Requirements
 
 - Python 3.10+
-- No external dependencies for CLI mode (works in air-gapped/intranet environments)
-- tkinter + ttkbootstrap for GUI mode (optional)
+- No external dependencies for standard CLI mode (works in air-gapped/intranet environments)
+- Optional dependencies:
+  - `rich` + `tabulate`: Enhanced CLI output (`run_cli.py`)
+  - `streamlit` + `pandas`: Web UI (`run_ui.py`)
 
 ## Installation
-
-### Standard Installation
 
 ```bash
 # Clone or download this repository
 git clone <repo-url>
 cd CQViewer
 
-# Create virtual environment (optional)
+# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # On macOS/Linux
 
-# Install (CLI only, no external dependencies)
-pip install -e .
-```
-
-### Air-Gapped / Intranet Installation (No pip)
-
-For environments without internet access or pip, you can run directly from source:
-
-```bash
-# Copy the entire CQViewer folder to your machine
-# Then run directly using Python:
-
-# Add src to PYTHONPATH and run CLI
-cd /path/to/CQViewer
-PYTHONPATH=src python -m cqviewer.cli info data.cq4
-PYTHONPATH=src python -m cqviewer.cli list data.cq4
-PYTHONPATH=src python -m cqviewer.cli export data.cq4 -o output.csv
-
-# Or create a simple wrapper script (run_cqviewer.sh):
-# #!/bin/bash
-# SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# PYTHONPATH="$SCRIPT_DIR/src" python -m cqviewer.cli "$@"
+# Install dependencies
+pip install -r requirements-company.txt
 ```
 
 On Windows (PowerShell):
 ```powershell
-$env:PYTHONPATH = "src"
-python -m cqviewer.cli info data.cq4
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements-company.txt
 ```
 
 ## Command Line Usage
 
-The CLI works without any external dependencies:
-
 ```bash
-# Open a folder (loads .cq4, .cq4t, and Java classes automatically)
-cqviewer open ./my-data-folder/
-
-# Show file information
-cqviewer info data.cq4
-
-# Show file info with tailer metadata (.cq4t file)
-cqviewer info data.cq4 -T metadata.cq4t
-
-# List messages (paginated)
-cqviewer list data.cq4
-cqviewer list data.cq4 -n 50 -o 100    # 50 messages starting at offset 100
-cqviewer list data.cq4 -t Order        # filter by type
-cqviewer list data.cq4 -f customerId   # filter by field existence
-cqviewer list data.cq4 -s "C001"       # search
-
-# Show single message details
-cqviewer show data.cq4 42              # show message #42
-cqviewer show data.cq4 42 --json       # output as JSON
-
-# Search messages
-cqviewer search data.cq4 "customer"
-cqviewer search data.cq4 "Order" --type-only
-cqviewer search data.cq4 "C001" --field-value customerId
-
-# Export to CSV
-cqviewer export data.cq4
-cqviewer export data.cq4 -o output.csv
-cqviewer export data.cq4 -t Order --fields customerId,amount
-
-# List all field names
-cqviewer fields data.cq4
-
-# List all message types
-cqviewer types data.cq4
+python run_cli.py ./data/                    # Open folder
+python run_cli.py ./data/queue.cq4           # Open specific file
+python run_cli.py ./data/ -n 100             # Show first 100 messages
+python run_cli.py ./data/ --search orderId   # Search for 'orderId'
+python run_cli.py ./data/ --types            # List message types
+python run_cli.py ./data/ --fields           # List all field names
+python run_cli.py ./data/ --export out.csv   # Export to CSV
+python run_cli.py ./data/ --show 5           # Show message at index 5
 ```
 
-### CLI Commands Reference
-
-| Command | Description |
-|---------|-------------|
-| `open` | Open a folder containing .cq4, .cq4t, and Java class files |
-| `info` | Show file information and type summary |
-| `list` | List messages with pagination |
-| `show` | Show details of a single message |
-| `search` | Search messages by query |
-| `export` | Export messages to CSV |
-| `fields` | List all unique field names |
-| `types` | List all message types with counts |
-| `schema` | Show or generate example schema file |
-
-### Common CLI Options
+### CLI Options
 
 | Option | Description |
 |--------|-------------|
-| `-T, --tailer FILE` | Path to .cq4t tailer/metadata file |
-| `-S, --schema FILE` | Java schema file (.java or .class) for BINARY_LIGHT decoding |
-| `-D, --schema-dir DIR` | Directory containing Java files (loads all including nested classes) |
-| `-E, --encoding` | Force encoding format: `binary`, `thrift`, or `sbe` |
-| `-m, --metadata` | Include metadata messages |
-| `-n, --limit N` | Limit number of results |
-| `-o, --offset N` | Start from offset N |
+| `-n, --limit N` | Number of messages to show (default: 50) |
+| `-o, --offset N` | Starting offset (default: 0) |
 | `-t, --type TYPE` | Filter by message type |
-| `-f, --has-field FIELD` | Filter by field existence |
 | `-s, --search QUERY` | Search query |
+| `--show INDEX` | Show detailed view of message at INDEX |
+| `--types` | List all message types |
+| `--fields` | List all unique field names |
+| `--export FILE` | Export to CSV file |
+| `--export-fields` | Comma-separated fields to export |
+| `-m, --metadata` | Include metadata messages |
 
-### Schema Support for BINARY_LIGHT Format
+## Web UI Usage
 
-When Chronicle Queue uses BINARY_LIGHT wire format, messages are serialized without field names. To decode these messages, provide your Java bean class files directly:
-
-```bash
-# Use a single Java source file
-cqviewer list data.cq4 -S FxTick.java
-
-# Use a compiled class file
-cqviewer list data.cq4 -S FxTick.class
-
-# Use multiple Java files for different message types
-cqviewer list data.cq4 -S FxTick.java -S Order.java -S Trade.java
-
-# Parse a Java file and see extracted fields
-cqviewer schema --parse FxTick.java
-```
-
-#### Directory Mode (Recommended for Nested Classes)
-
-When your data structures include nested or inner classes, use directory mode to load all related class definitions at once:
+Run the Streamlit web interface:
 
 ```bash
-# Load all Java files from a directory (including nested classes)
-cqviewer list data.cq4 -D ./src/main/java/com/example/model/
-
-# Load compiled classes from target directory
-cqviewer list data.cq4 -D ./target/classes/com/example/model/
-
-# Scan a directory to see all discovered classes
-cqviewer schema --scan-dir ./src/main/java/com/example/model/
-
-# Force specific encoding for directory
-cqviewer list data.cq4 -D ./models/ -E thrift
-cqviewer list data.cq4 -D ./models/ -E sbe
+streamlit run run_ui.py
 ```
 
-Directory mode benefits:
-- Automatically discovers all `.java` and `.class` files recursively
-- Extracts inner/nested classes from `.java` source files
-- Merges all class definitions into a single schema
-- Enables proper decoding of complex nested data structures
-
-#### Supported Field Types
-
-| Java Type | Binary Size |
-|-----------|-------------|
-| `byte` | 1 byte |
-| `short` | 2 bytes |
-| `int` | 4 bytes |
-| `long` | 8 bytes |
-| `float` | 4 bytes |
-| `double` | 8 bytes |
-| `boolean` | 1 byte |
-| `String` | length-prefixed |
-| `byte[]` | length-prefixed |
-
-Note: Static and transient fields are automatically excluded.
-
-## GUI Usage
-
-To use the graphical interface, install with GUI support:
-
+Or with a specific port:
 ```bash
-pip install -e ".[gui]"
-cqviewer-gui
+streamlit run run_ui.py --server.port 8501
 ```
 
-### Opening a File
+### Features
 
-1. Click **File > Open .cq4 File** or press `Ctrl+O`
-2. Select a `.cq4` file from your filesystem
-3. Messages will load in the table view
-
-### Opening a Folder (Recommended)
-
-Put your `.cq4` data file, `.cq4t` metadata file, and Java class definitions all in one folder, then:
-
-1. Click **Open Folder** button or **File > Open Folder...** or press `Ctrl+Shift+O`
-2. Select the folder
-3. The tool automatically loads:
-   - The `.cq4` data file
-   - The `.cq4t` tailer/metadata file (if present)
-   - All `.java` and `.class` files for schema (including nested classes)
-
-This is the easiest way to work with BINARY_LIGHT encoded data that requires Java class definitions.
-
-### Searching
-
-Use the search bar to find messages:
-
-- **By field name**: Type a field name (e.g., `customerId`) to find messages containing that field
-- **By value**: Type a value to search across all fields (supports regex)
-- **By type**: Type part of a type name (e.g., `Order`)
-
-### Filtering
-
-Use the filter dropdowns to narrow results:
-
-- **Type Filter**: Select a specific message type from the dropdown
-- **Field Filter**: Show only messages that have a specific field
-
-Click **Apply Filters** to apply, or **Reset** to clear all filters.
-
-### Viewing Message Details
-
-Click on any message row to see its details in the right panel:
-
-- **Tree View**: Hierarchical view of fields and nested objects
-- **JSON View**: JSON representation of the message
-- **Flat View**: Flattened key-value pairs (useful for seeing nested field paths)
-
-### Exporting to CSV
-
-1. Click **File > Export to CSV** or press `Ctrl+E`
-2. Select which fields to include:
-   - Use **Add >** to add selected fields
-   - Use **Add All >>** to include all fields
-   - Use **< Remove** to remove fields
-3. Configure options:
-   - Include message index
-   - Include file offset
-   - Include message type
-4. Click **Preview** to see a sample of the output
-5. Click **Export** and choose a save location
-
-### Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+O` | Open file |
-| `Ctrl+E` | Export to CSV |
-| `Ctrl+Q` | Quit |
-| `F5` | Refresh |
+- **Load Data**: Enter a path to a `.cq4` file or folder in the sidebar
+- **Browse Messages**: View messages in a paginated table with filtering
+- **Search**: Search by field name, value, or message type
+- **Filter**: Filter by message type or field existence
+- **Export**: Export to CSV with field selection
 
 ## Programmatic Usage
 
-You can also use CQViewer as a library:
+You can also use CQViewer as a library (run with `PYTHONPATH=src`):
 
 ```python
-from cqviewer.parser import CQ4Reader
-from cqviewer.services import SearchService, FilterService, ExportService
-
-# Read a .cq4 file
-with CQ4Reader("path/to/file.cq4") as reader:
-    for excerpt in reader.iter_excerpts():
-        print(f"Message {excerpt.index}: {excerpt.data.fields}")
-
-# Using services
-from cqviewer.services import MessageService
+from cqviewer.services.message_service import MessageService
+from cqviewer.services.search_service import SearchService
+from cqviewer.services.filter_service import FilterService
+from cqviewer.services.export_service import ExportService
 
 service = MessageService()
 service.load_file("path/to/file.cq4")
@@ -314,40 +132,24 @@ cqviewer/
 │   │   ├── message.py       # Message representation
 │   │   ├── field.py         # Field with type info
 │   │   └── queue_info.py    # Queue metadata
-│   ├── services/        # Business logic
-│   │   ├── message_service.py   # Load/cache/paginate
-│   │   ├── search_service.py    # Search functionality
-│   │   ├── filter_service.py    # Filter criteria
-│   │   └── export_service.py    # CSV export
-│   └── ui/              # User interface
-│       ├── app.py           # Main application
-│       └── widgets/         # UI components
+│   └── services/        # Business logic
+│       ├── message_service.py   # Load/cache/paginate
+│       ├── search_service.py    # Search functionality
+│       ├── filter_service.py    # Filter criteria
+│       └── export_service.py    # CSV export
+├── run_cli.py           # Enhanced CLI (rich/tabulate)
+├── run_ui.py            # Web UI (streamlit)
 └── tests/               # Automated tests
 ```
 
 ## Running Tests
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/ -v
+pip install pytest
+PYTHONPATH=src pytest tests/ -v
 ```
 
 ## Troubleshooting
-
-### "No module named '_tkinter'"
-
-tkinter is not installed. On macOS:
-```bash
-brew install python-tk@3.13
-```
-
-On Ubuntu/Debian:
-```bash
-sudo apt-get install python3-tk
-```
 
 ### File won't open
 

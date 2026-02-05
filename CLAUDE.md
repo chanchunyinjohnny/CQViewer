@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Important Rules
+
+- **Do NOT include any proprietary information, company names, or company-specific details in any code, comments, documentation, or configuration files.**
+
 ## Project Overview
 
 This project is a Python-based tool for inspecting and exporting data from CQ (chronicle queue).
@@ -35,14 +39,14 @@ Add automated tests to verify functionality.
 ## Environment Setup
 
 ```bash
-# Standard installation
 source .venv/bin/activate
-pip install -e .
+pip install -r requirements-company.txt
 
-# Air-gapped / no-pip usage (run directly from source)
-./run_cqviewer.sh info data.cq4
-# or
-PYTHONPATH=src python -m cqviewer.cli info data.cq4
+# CLI
+python run_cli.py ./data/
+
+# Web UI
+streamlit run run_ui.py
 ```
 
 ## Python Version

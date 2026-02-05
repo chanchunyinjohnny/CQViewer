@@ -1,0 +1,13 @@
+# CQViewer - Approved dependencies only
+
+# CLI dependencies (optional - works without these but output is nicer)
+rich                    # Beautiful terminal output
+tabulate                # Table formatting
+
+# UI dependencies (required for run_ui.py)
+streamlit>=1.30         # Web UI framework
+pandas>=2.1             # Data manipulation
+
+# Note: All core functionality uses Python standard library only.
+# The CLI (run_cli.py) works without any external dependencies,
+# but rich/tabulate provide better formatting.

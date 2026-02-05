@@ -1,1 +1,0 @@
-"""UI widgets for CQViewer."""
