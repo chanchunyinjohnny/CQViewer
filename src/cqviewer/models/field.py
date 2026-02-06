@@ -71,11 +71,11 @@ class Field:
             return FieldType.ARRAY
         return FieldType.UNKNOWN
 
-    def format_value(self, max_length: int = 100) -> str:
+    def format_value(self, max_length: int | None = None) -> str:
         """Format value for display.
 
         Args:
-            max_length: Maximum string length before truncation
+            max_length: Maximum string length before truncation. None for no limit.
 
         Returns:
             Formatted string representation
@@ -84,24 +84,33 @@ class Field:
             return "<null>"
 
         if self.field_type == FieldType.BYTES:
-            # Show hex preview for bytes
+            # Show hex for bytes
             hex_str = self.value.hex()
-            if len(hex_str) > max_length:
+            if max_length and len(hex_str) > max_length:
                 return f"<bytes:{len(self.value)}> {hex_str[:max_length]}..."
             return f"<bytes:{len(self.value)}> {hex_str}"
 
         if self.field_type == FieldType.OBJECT:
-            # Show object summary
-            keys = list(self.value.keys()) if isinstance(self.value, dict) else []
-            type_hint = self.value.get("__type__", "") if isinstance(self.value, dict) else ""
-            if type_hint:
-                return f"{{{type_hint}: {len(keys)} fields}}"
-            return f"{{object: {len(keys)} fields}}"
+            # Format nested object as readable string
+            import json
+            try:
+                return json.dumps(self.value, default=str)
+            except Exception:
+                keys = list(self.value.keys()) if isinstance(self.value, dict) else []
+                type_hint = self.value.get("__type__", "") if isinstance(self.value, dict) else ""
+                if type_hint:
+                    return f"{{{type_hint}: {len(keys)} fields}}"
+                return f"{{object: {len(keys)} fields}}"
 
         if self.field_type == FieldType.ARRAY:
-            return f"[{len(self.value)} items]"
+            # Format array as readable string
+            import json
+            try:
+                return json.dumps(self.value, default=str)
+            except Exception:
+                return f"[{len(self.value)} items]"
 
         str_value = str(self.value)
-        if len(str_value) > max_length:
+        if max_length and len(str_value) > max_length:
             return str_value[:max_length] + "..."
         return str_value

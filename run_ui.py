@@ -128,7 +128,7 @@ def messages_to_dataframe(messages, columns=None):
         }
         for name, field in msg.fields.items():
             if columns is None or name in columns:
-                row[name] = field.format_value(max_length=100)
+                row[name] = field.format_value()  # No truncation
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -323,13 +323,12 @@ def main():
         if page_messages:
             df = messages_to_dataframe(page_messages)
 
-            # Select columns to display
+            # Select columns to display (all columns by default)
             available_cols = list(df.columns)
-            default_cols = ["Index", "Type"] + [c for c in available_cols if not c.startswith("_")][:5]
             selected_cols = st.multiselect(
                 "Columns to display",
                 options=available_cols,
-                default=[c for c in default_cols if c in available_cols]
+                default=available_cols
             )
 
             if selected_cols:
@@ -337,6 +336,32 @@ def main():
                     df[selected_cols],
                     use_container_width=True,
                     hide_index=True
+                )
+
+                # Cell value viewer
+                st.subheader("Cell Value Viewer")
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    row_idx = st.number_input(
+                        "Row number",
+                        min_value=0,
+                        max_value=max(0, len(df) - 1),
+                        value=0,
+                        key="cell_viewer_row"
+                    )
+                with col2:
+                    cell_column = st.selectbox(
+                        "Column",
+                        options=selected_cols,
+                        key="cell_viewer_col"
+                    )
+
+                cell_value = df.iloc[row_idx].get(cell_column, "")
+                st.text_area(
+                    f"Full value of '{cell_column}' (Row {row_idx})",
+                    value=str(cell_value),
+                    height=150,
+                    key="cell_value_display"
                 )
 
         # Message detail view
