@@ -232,3 +232,89 @@ class TestCQ4Reader:
                 assert len(messages) == 0
         finally:
             filepath.unlink()
+
+    def test_read_excerpt_at_offset(self):
+        """Test reading a single excerpt at a specific offset."""
+        msg = create_simple_message("val", 99)
+        filepath = create_test_cq4_file([msg])
+
+        try:
+            with CQ4Reader(filepath) as reader:
+                # First find offset of data message by iterating
+                excerpts = list(reader.iter_excerpts())
+                assert len(excerpts) >= 1
+                offset = excerpts[0].offset
+
+                # Now read at that offset
+                excerpt = reader.read_excerpt(offset)
+                assert excerpt is not None
+                assert excerpt.data is not None
+                assert excerpt.data.fields.get("val") == 99
+        finally:
+            filepath.unlink()
+
+    def test_read_excerpt_invalid_offset(self):
+        """Test reading excerpt at invalid offset returns None."""
+        msg = create_simple_message("test", 1)
+        filepath = create_test_cq4_file([msg])
+
+        try:
+            with CQ4Reader(filepath) as reader:
+                result = reader.read_excerpt(999999)
+                assert result is None
+        finally:
+            filepath.unlink()
+
+    def test_iter_excerpts_with_start_index(self):
+        """Test iterating excerpts starting from a specific index."""
+        messages_data = [create_simple_message("n", i) for i in range(5)]
+        filepath = create_test_cq4_file(messages_data)
+
+        try:
+            with CQ4Reader(filepath) as reader:
+                excerpts = list(reader.iter_excerpts(start_index=2))
+                assert len(excerpts) == 3
+                assert excerpts[0].index == 2
+        finally:
+            filepath.unlink()
+
+    def test_get_messages_with_metadata(self):
+        """Test getting messages including metadata."""
+        msg = create_simple_message("data", 1)
+        filepath = create_test_cq4_file([msg], include_header=True)
+
+        try:
+            with CQ4Reader(filepath) as reader:
+                without = reader.get_messages(include_metadata=False)
+                with_meta = reader.get_messages(include_metadata=True)
+                assert len(with_meta) > len(without)
+        finally:
+            filepath.unlink()
+
+    def test_double_open(self):
+        """Test opening an already-open reader is a no-op."""
+        msg = create_simple_message("test", 1)
+        filepath = create_test_cq4_file([msg])
+
+        try:
+            reader = CQ4Reader(filepath)
+            reader.open()
+            mmap_ref = reader._mmap
+            reader.open()  # Should not re-open
+            assert reader._mmap is mmap_ref
+            reader.close()
+        finally:
+            filepath.unlink()
+
+    def test_double_close(self):
+        """Test closing an already-closed reader is safe."""
+        msg = create_simple_message("test", 1)
+        filepath = create_test_cq4_file([msg])
+
+        try:
+            reader = CQ4Reader(filepath)
+            reader.open()
+            reader.close()
+            reader.close()  # Should not raise
+        finally:
+            filepath.unlink()

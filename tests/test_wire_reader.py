@@ -219,3 +219,132 @@ class TestWireReaderObject:
 
         assert "value" in obj
         assert obj["value"] is None
+
+    def test_read_object_empty_data_produces_raw(self):
+        """Test that unreadable data produces _raw_hex."""
+        # Data that can't be parsed as fields (no valid field name prefix)
+        data = bytes([0x01, 0x02, 0x03, 0x04])
+        reader = WireReader(data)
+        obj = reader.read_object()
+
+        assert "_raw_hex" in obj
+        assert "_raw_length" in obj
+        assert obj["_raw_length"] == 4
+
+
+class TestWireReaderMessage:
+    """Test reading complete messages."""
+
+    def test_read_message_simple(self):
+        """Test reading a message without type prefix."""
+        data = bytes([0xC4]) + b"name" + bytes([0xE4]) + b"John"
+        reader = WireReader(data)
+        msg = reader.read_message()
+
+        assert msg is not None
+        assert msg.type_hint is None
+        assert "name" in msg.fields
+        assert msg.fields["name"] == "John"
+
+    def test_read_message_with_type_prefix(self):
+        """Test reading a message with type prefix."""
+        type_name = b"!types.Order"
+        # TYPE_PREFIX (0xB6) + stop-bit length + type string + field data
+        data = (
+            bytes([WireType.TYPE_PREFIX, len(type_name)]) + type_name
+            + bytes([0xC2]) + b"id" + bytes([WireType.INT32]) + struct.pack("<i", 42)
+        )
+        reader = WireReader(data)
+        msg = reader.read_message()
+
+        assert msg is not None
+        assert msg.type_hint == "!types.Order"
+
+    def test_read_message_empty(self):
+        """Test reading message from empty data."""
+        reader = WireReader(b"")
+        msg = reader.read_message()
+        assert msg is None
+
+    def test_read_message_raw_offset_and_size(self):
+        """Test that message tracks raw offset and size."""
+        data = bytes([0xC3]) + b"val" + bytes([WireType.INT32]) + struct.pack("<i", 1)
+        reader = WireReader(data)
+        msg = reader.read_message()
+
+        assert msg is not None
+        assert msg.raw_offset == 0
+        assert msg.raw_size == len(data)
+
+
+class TestWireReaderAdditionalValues:
+    """Test reading additional value types."""
+
+    def test_read_uint8_value(self):
+        """Test reading UINT8 value."""
+        data = bytes([WireType.UINT8, 0xFF])
+        reader = WireReader(data)
+        assert reader.read_value() == 255
+
+    def test_read_uint16_value(self):
+        """Test reading UINT16 value."""
+        data = bytes([WireType.UINT16]) + struct.pack("<H", 65535)
+        reader = WireReader(data)
+        assert reader.read_value() == 65535
+
+    def test_read_int8_value(self):
+        """Test reading INT8 value."""
+        data = bytes([WireType.INT8, 0xFF])  # -1 signed
+        reader = WireReader(data)
+        assert reader.read_value() == -1
+
+    def test_read_int16_value(self):
+        """Test reading INT16 value."""
+        data = bytes([WireType.INT16]) + struct.pack("<h", -100)
+        reader = WireReader(data)
+        assert reader.read_value() == -100
+
+    def test_read_float64_value(self):
+        """Test reading FLOAT64 value."""
+        data = bytes([WireType.FLOAT64]) + struct.pack("<d", 2.71828)
+        reader = WireReader(data)
+        assert abs(reader.read_value() - 2.71828) < 0.00001
+
+    def test_read_nested_block(self):
+        """Test reading NESTED_BLOCK value."""
+        # Nested block: field "x" = 42
+        nested_content = bytes([0xC1]) + b"x" + bytes([WireType.INT32]) + struct.pack("<i", 42)
+        data = bytes([WireType.NESTED_BLOCK, len(nested_content)]) + nested_content
+        reader = WireReader(data)
+        result = reader.read_value()
+
+        assert isinstance(result, dict)
+        assert result["x"] == 42
+
+    def test_read_bytes_length32(self):
+        """Test reading BYTES_LENGTH32 value."""
+        payload = b"\xDE\xAD\xBE\xEF"
+        data = bytes([WireType.BYTES_LENGTH32]) + struct.pack("<i", len(payload)) + payload
+        reader = WireReader(data)
+        result = reader.read_value()
+        assert result == payload
+
+    def test_read_unknown_type(self):
+        """Test reading unknown type code."""
+        # 0xAA is not a defined WireType
+        data = bytes([0xAA])
+        reader = WireReader(data)
+        result = reader.read_value()
+        assert "<unknown:" in str(result)
+
+    def test_read_value_at_end(self):
+        """Test reading value when no data remains."""
+        reader = WireReader(b"")
+        assert reader.read_value() is None
+
+    def test_skip(self):
+        """Test skipping bytes."""
+        reader = WireReader(bytes([1, 2, 3, 4, 5]))
+        reader.skip(3)
+        assert reader.remaining == 2
+        assert reader.read_byte() == 4

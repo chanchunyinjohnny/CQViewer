@@ -154,7 +154,7 @@ def parse_java_source(filepath: str | Path) -> tuple[str | None, list[JavaField]
             class_body = content_no_comments[brace_pos + 1:pos - 1]
 
     if not class_body:
-        return class_name, fields
+        return class_name, fields, detected_encoding
 
     # Remove method bodies to avoid picking up local variables
     # Find methods by looking for patterns like: type name(...) { ... }

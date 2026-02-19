@@ -10,8 +10,9 @@ from cqviewer.parser.java_parser import (
     java_type_to_schema_type, java_fields_to_schema, merge_schemas,
     JavaField, extract_inner_classes, parse_java_source_with_inner_classes,
     scan_directory_for_java_files, parse_directory, ClassRegistry,
+    detect_encoding_from_source, extract_thrift_field_ids,
 )
-from cqviewer.parser.schema import Schema, MessageDef, FieldDef
+from cqviewer.parser.schema import Schema, MessageDef, FieldDef, ENCODING_BINARY, ENCODING_SBE
 
 
 class TestJavaTypeMapping:
@@ -599,3 +600,170 @@ class TestParseDirectory:
         with tempfile.TemporaryDirectory() as tmpdir:
             with pytest.raises(ValueError, match="No .java or .class files found"):
                 parse_directory(tmpdir)
+
+
+class TestDetectEncoding:
+    """Tests for encoding auto-detection."""
+
+    def test_detect_binary_default(self):
+        """Test that plain Java source defaults to binary encoding."""
+        code = "public class Order { private long id; }"
+        assert detect_encoding_from_source(code) == ENCODING_BINARY
+
+    def test_detect_sbe_from_import(self):
+        """Test SBE detection from import statement."""
+        code = "import uk.co.real_logic.sbe.codec.Encoder;"
+        assert detect_encoding_from_source(code) == ENCODING_SBE
+
+    def test_detect_sbe_from_annotation(self):
+        """Test SBE detection from @SbeField annotation."""
+        code = "@SbeField(name = \"orderId\") private long orderId;"
+        assert detect_encoding_from_source(code) == ENCODING_SBE
+
+    def test_detect_sbe_from_header_encoder(self):
+        """Test SBE detection from MessageHeaderEncoder usage."""
+        code = "MessageHeaderEncoder headerEncoder = new MessageHeaderEncoder();"
+        assert detect_encoding_from_source(code) == ENCODING_SBE
+
+    def test_thrift_not_auto_detected(self):
+        """Test that Thrift classes are NOT auto-detected (defaults to binary)."""
+        code = """
+        import org.apache.thrift.TBase;
+        public class Order extends TBase {
+            private long orderId;
+        }
+        """
+        # Per the source code design: Thrift classes default to binary
+        assert detect_encoding_from_source(code) == ENCODING_BINARY
+
+
+class TestExtractThriftFieldIds:
+    """Tests for extracting Thrift field IDs."""
+
+    def test_extract_tfield_declarations(self):
+        """Test extracting TField ID declarations."""
+        code = """
+        private static final org.apache.thrift.protocol.TField APP_ID_FIELD_DESC =
+            new org.apache.thrift.protocol.TField("appId", org.apache.thrift.protocol.TType.STRING, (short)2);
+        private static final org.apache.thrift.protocol.TField SESSION_ID_FIELD_DESC =
+            new org.apache.thrift.protocol.TField("sessionId", org.apache.thrift.protocol.TType.I64, (short)3);
+        """
+        ids = extract_thrift_field_ids(code)
+        assert ids["appId"] == 2
+        assert ids["sessionId"] == 3
+
+    def test_extract_no_tfield(self):
+        """Test extraction from code without TField declarations."""
+        code = "public class Simple { private int x; }"
+        ids = extract_thrift_field_ids(code)
+        assert len(ids) == 0
+
+
+class TestParseJavaSourceEdgeCases:
+    """Tests for edge cases in parse_java_source."""
+
+    def test_parse_no_class_body(self):
+        """Test parsing a file with no class body."""
+        java_code = "// Just a comment, no class"
+        with tempfile.NamedTemporaryFile(suffix=".java", mode="w", delete=False) as f:
+            f.write(java_code)
+            f.flush()
+            class_name, fields, encoding = parse_java_source(f.name)
+
+        assert fields == []
+        assert encoding == ENCODING_BINARY
+
+    def test_parse_empty_class(self):
+        """Test parsing a class with no fields."""
+        java_code = "public class Empty {}"
+        with tempfile.NamedTemporaryFile(suffix=".java", mode="w", delete=False) as f:
+            f.write(java_code)
+            f.flush()
+            class_name, fields, encoding = parse_java_source(f.name)
+
+        assert class_name == "Empty"
+        assert len(fields) == 0
+
+    def test_parse_with_package(self):
+        """Test parsing respects package declaration."""
+        java_code = """
+        package com.example.model;
+        public class Trade {
+            private long tradeId;
+        }
+        """
+        with tempfile.NamedTemporaryFile(suffix=".java", mode="w", delete=False) as f:
+            f.write(java_code)
+            f.flush()
+            class_name, fields, encoding = parse_java_source(f.name)
+
+        assert class_name == "Trade"
+        assert len(fields) == 1
+
+    def test_parse_with_generic_field(self):
+        """Test parsing fields with generic types."""
+        java_code = """
+        public class Container {
+            private List<String> items;
+        }
+        """
+        with tempfile.NamedTemporaryFile(suffix=".java", mode="w", delete=False) as f:
+            f.write(java_code)
+            f.flush()
+            class_name, fields, encoding = parse_java_source(f.name)
+
+        names = [f.name for f in fields]
+        assert "items" in names
+
+
+class TestJavaFieldsToSchemaEdgeCases:
+    """Tests for edge cases in java_fields_to_schema."""
+
+    def test_skips_internal_thrift_fields(self):
+        """Test that fields starting with _ are skipped."""
+        fields = [
+            JavaField(name="orderId", java_type="long"),
+            JavaField(name="_fieldName", java_type="String"),
+            JavaField(name="__isset_bitfield", java_type="int"),
+        ]
+        schema = java_fields_to_schema("Order", fields)
+        field_names = [f.name for f in schema.messages["Order"].fields]
+        assert "orderId" in field_names
+        assert "_fieldName" not in field_names
+        assert "__isset_bitfield" not in field_names
+
+    def test_object_field_stores_nested_type(self):
+        """Test that object fields store their Java type as nested_type."""
+        fields = [JavaField(name="header", java_type="HeaderInfo")]
+        schema = java_fields_to_schema("Order", fields)
+        field_def = schema.messages["Order"].fields[0]
+        assert field_def.type == "object"
+        assert field_def.nested_type == "HeaderInfo"
+
+    def test_encoding_parameter(self):
+        """Test that encoding parameter is set on schema."""
+        fields = [JavaField(name="x", java_type="int")]
+        schema = java_fields_to_schema("Test", fields, encoding="thrift")
+        assert schema.encoding == "thrift"
+
+    def test_encoding_defaults_to_binary(self):
+        """Test that encoding defaults to binary when None."""
+        fields = [JavaField(name="x", java_type="int")]
+        schema = java_fields_to_schema("Test", fields)
+        assert schema.encoding == ENCODING_BINARY
+
+
+class TestJavaTypeMappingEdgeCases:
+    """Additional Java type mapping tests."""
+
+    def test_array_types(self):
+        """Test array types map to bytes."""
+        assert java_type_to_schema_type("int[]") == "bytes"
+        assert java_type_to_schema_type("String[]") == "bytes"
+
+    def test_boxed_primitives(self):
+        """Test all boxed primitive types."""
+        assert java_type_to_schema_type("Byte") == "int8"
+        assert java_type_to_schema_type("Short") == "int16"
+        assert java_type_to_schema_type("Float") == "float32"
+        assert java_type_to_schema_type("Character") == "uint16"

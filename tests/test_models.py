@@ -80,6 +80,48 @@ class TestField:
         assert len(formatted) <= 53  # 50 + "..."
         assert formatted.endswith("...")
 
+    def test_format_value_bytes(self):
+        """Test formatting bytes value shows hex."""
+        field = Field.from_value("raw", b"\xde\xad\xbe\xef")
+        formatted = field.format_value()
+        assert "<bytes:4>" in formatted
+        assert "deadbeef" in formatted
+
+    def test_format_value_bytes_truncation(self):
+        """Test formatting long bytes value truncates hex."""
+        field = Field.from_value("raw", b"\x00" * 100)
+        formatted = field.format_value(max_length=10)
+        assert formatted.endswith("...")
+        assert "<bytes:100>" in formatted
+
+    def test_format_value_object(self):
+        """Test formatting dict value as JSON."""
+        field = Field.from_value("data", {"key": "value"})
+        formatted = field.format_value()
+        assert "key" in formatted
+        assert "value" in formatted
+
+    def test_format_value_array(self):
+        """Test formatting list value as JSON."""
+        field = Field.from_value("items", [1, 2, 3])
+        formatted = field.format_value()
+        assert "[1, 2, 3]" in formatted
+
+    def test_format_value_integer(self):
+        """Test formatting integer value."""
+        field = Field.from_value("count", 42)
+        assert field.format_value() == "42"
+
+    def test_from_value_tuple(self):
+        """Test creating field from tuple value (treated as ARRAY)."""
+        field = Field.from_value("coords", (1, 2))
+        assert field.field_type == FieldType.ARRAY
+
+    def test_from_value_unknown(self):
+        """Test creating field from unknown type."""
+        field = Field.from_value("obj", object())
+        assert field.field_type == FieldType.UNKNOWN
+
 
 class TestMessage:
     """Tests for Message model."""
@@ -205,6 +247,102 @@ class TestMessage:
         assert msg.matches_type("order")  # Case insensitive
         assert not msg.matches_type("Customer")
 
+    def test_matches_type_no_hint(self):
+        """Test type matching with no type hint returns False."""
+        msg = Message.from_parsed(index=0, offset=0, type_hint=None, fields_dict={})
+        assert not msg.matches_type("Order")
+
+    def test_from_parsed_skips_type_key(self):
+        """Test that __type__ key is skipped during field creation."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None,
+            fields_dict={"__type__": "Order", "name": "John"},
+        )
+        assert len(msg.fields) == 1
+        assert "name" in msg.fields
+        assert "__type__" not in msg.fields
+
+    def test_from_parsed_is_metadata(self):
+        """Test creating metadata message."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None,
+            fields_dict={"data": "test"}, is_metadata=True,
+        )
+        assert msg.is_metadata is True
+
+    def test_get_field_nested_non_object(self):
+        """Test dot notation on non-object field returns None."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None,
+            fields_dict={"name": "John"},
+        )
+        assert msg.get_field("name.first") is None
+
+    def test_get_field_nested_missing_key(self):
+        """Test dot notation with missing nested key returns None."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None,
+            fields_dict={"address": {"city": "NYC"}},
+        )
+        assert msg.get_field("address.missing") is None
+
+    def test_field_names_nested_skips_type(self):
+        """Test nested field names skip __type__ keys."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None,
+            fields_dict={"data": {"__type__": "Inner", "value": 1}},
+        )
+        names = msg.field_names(include_nested=True)
+        assert "data.value" in names
+        assert "data.__type__" not in names
+
+    def test_flatten_no_type_hint(self):
+        """Test flatten with no type hint gives empty string."""
+        msg = Message.from_parsed(index=0, offset=0, type_hint=None, fields_dict={"x": 1})
+        flat = msg.flatten()
+        assert flat["_type"] == ""
+
+    def test_flatten_null_value(self):
+        """Test flatten preserves None values."""
+        msg = Message.from_parsed(index=0, offset=0, type_hint=None, fields_dict={"x": None})
+        flat = msg.flatten()
+        assert flat["x"] is None
+
+    def test_flatten_bytes_value(self):
+        """Test flatten converts bytes to hex."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None, fields_dict={"raw": b"\xab\xcd"}
+        )
+        flat = msg.flatten()
+        assert flat["raw"] == "abcd"
+
+    def test_flatten_nested_with_type(self):
+        """Test flatten includes __type__ from nested objects."""
+        msg = Message.from_parsed(
+            index=0, offset=0, type_hint=None,
+            fields_dict={"nested": {"__type__": "Inner", "val": 1}},
+        )
+        flat = msg.flatten()
+        assert flat["nested.__type__"] == "Inner"
+        assert flat["nested.val"] == 1
+
+    def test_str_representation(self):
+        """Test Message __str__ output."""
+        msg = Message.from_parsed(
+            index=5, offset=0, type_hint="!types.Order",
+            fields_dict={"a": 1, "b": 2},
+        )
+        s = str(msg)
+        assert "5" in s
+        assert "Order" in s
+        assert "2 fields" in s
+
+    def test_str_representation_no_type(self):
+        """Test Message __str__ with no type hint."""
+        msg = Message.from_parsed(index=0, offset=0, type_hint=None, fields_dict={})
+        s = str(msg)
+        assert "unknown" in s
+
 
 class TestQueueInfo:
     """Tests for QueueInfo model."""
@@ -232,3 +370,26 @@ class TestQueueInfo:
             filepath=Path("/data/queues/test.cq4"), file_size=100, message_count=5
         )
         assert info.filename == "test.cq4"
+
+    def test_str_representation(self):
+        """Test QueueInfo __str__ output."""
+        info = QueueInfo(filepath=Path("test.cq4"), file_size=500, message_count=10)
+        s = str(info)
+        assert "test.cq4" in s
+        assert "500.0 B" in s
+        assert "10 messages" in s
+
+    def test_file_size_str_gb(self):
+        """Test file size formatting for GB."""
+        info = QueueInfo(
+            filepath=Path("test.cq4"), file_size=2 * 1024 ** 3, message_count=10
+        )
+        assert info.file_size_str == "2.0 GB"
+
+    def test_default_values(self):
+        """Test QueueInfo default values."""
+        info = QueueInfo(filepath=Path("test.cq4"), file_size=0, message_count=0)
+        assert info.version == 0
+        assert info.roll_cycle == ""
+        assert info.index_count == 0
+        assert info.index_spacing == 0
