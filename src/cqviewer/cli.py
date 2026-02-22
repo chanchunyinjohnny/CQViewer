@@ -175,7 +175,12 @@ def cmd_info(args: argparse.Namespace) -> int:
 
         # Show schema info if loaded
         if schema:
-            schema_files = ", ".join(args.schema) if args.schema else "unknown"
+            if args.schema:
+                schema_files = ", ".join(args.schema)
+            elif getattr(args, "schema_dir", None):
+                schema_files = args.schema_dir
+            else:
+                schema_files = "auto-detected"
             print(f"\nSchema: {schema_files}")
             print(f"Encoding: {schema.encoding}")
             print(f"Message Types Defined: {len(schema.messages)}")
@@ -262,7 +267,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
         # Determine columns
         if args.fields:
-            columns = args.fields.split(",")
+            columns = [f.strip() for f in args.fields.split(",")]
         else:
             columns = ["index", "type"]
             # Add common fields (excluding internal ones for cleaner display)
@@ -369,6 +374,21 @@ def cmd_show(args: argparse.Namespace) -> int:
         service.close()
 
 
+def _get_match_context(msg: Message, query_lower: str) -> str:
+    """Get brief description of why a message matched a search query."""
+    if msg.type_hint and query_lower in msg.type_hint.lower():
+        return f"type: {msg.type_hint}"
+    for name in msg.field_names(include_nested=True):
+        if query_lower in name.lower():
+            return f"field: {name}"
+    for name, field in msg.fields.items():
+        val_str = str(field.value) if field.value is not None else ""
+        if query_lower in val_str.lower():
+            preview = val_str[:40] + "..." if len(val_str) > 40 else val_str
+            return f"{name}={preview}"
+    return ""
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     """Search messages."""
     service = MessageService()
@@ -392,11 +412,16 @@ def cmd_search(args: argparse.Namespace) -> int:
 
         print(f"Found {len(results)} matches for '{args.query}'")
 
-        # Show first N results
+        # Show first N results with match context
         limit = min(args.limit, len(results))
+        query_lower = args.query.lower()
         for msg in results[:limit]:
             type_str = msg.type_hint or "unknown"
-            print(f"  [{msg.index}] {type_str}")
+            context = _get_match_context(msg, query_lower)
+            if context:
+                print(f"  [{msg.index}] {type_str}  ({context})")
+            else:
+                print(f"  [{msg.index}] {type_str}")
 
         if len(results) > limit:
             print(f"  ... and {len(results) - limit} more")
@@ -436,10 +461,10 @@ def cmd_export(args: argparse.Namespace) -> int:
             return 1
 
         # Parse fields
-        fields = args.fields.split(",") if args.fields else None
+        fields = [f.strip() for f in args.fields.split(",")] if args.fields else None
 
         # Export
-        output = args.output or args.file.replace(".cq4", ".csv")
+        output = args.output or str(Path(args.file).with_suffix(".csv"))
         export.export_to_csv(
             messages,
             output_path=output,

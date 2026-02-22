@@ -24,12 +24,15 @@ A Python tool for inspecting and exporting Chronicle Queue (.cq4) data files.
 # Clone or download this repository
 git clone <repo-url>
 cd CQViewer
-
-# Install dependencies (in your Python/conda environment)
-pip install -r requirements-company.txt
 ```
 
 ## Command Line Usage
+
+CQViewer provides two CLI interfaces:
+
+### Quick CLI (`run_cli.py`)
+
+Best for quick one-off commands. Requires `rich` and `tabulate` for formatted output (falls back to plain text if unavailable).
 
 ```bash
 python run_cli.py ./data/                    # Open folder
@@ -41,8 +44,6 @@ python run_cli.py ./data/ --fields           # List all field names
 python run_cli.py ./data/ --export out.csv   # Export to CSV
 python run_cli.py ./data/ --show 5           # Show message at index 5
 ```
-
-### CLI Options
 
 | Option | Description |
 |--------|-------------|
@@ -56,6 +57,23 @@ python run_cli.py ./data/ --show 5           # Show message at index 5
 | `--export FILE` | Export to CSV file |
 | `--export-fields` | Comma-separated fields to export |
 | `-m, --metadata` | Include metadata messages |
+
+### Advanced CLI (`cqviewer` / `cli.py`)
+
+Subcommand-based CLI with additional features: Java schema loading, tailer metadata, encoding override, and more. No external dependencies required.
+
+```bash
+# Run via: PYTHONPATH=src python -m cqviewer.cli <command> [options]
+cqviewer open ./data/                        # Open folder (auto-finds .cq4, .cq4t, Java files)
+cqviewer info data.cq4                       # Show file info
+cqviewer list data.cq4 -n 50                 # List messages with pagination
+cqviewer show data.cq4 3                     # Show message at index 3
+cqviewer search data.cq4 "orderId"           # Search messages
+cqviewer export data.cq4 -o out.csv          # Export to CSV
+cqviewer list data.cq4 -S Order.java         # Load with Java schema
+cqviewer list data.cq4 -D ./model/ -E thrift # Load with directory schema + encoding
+cqviewer schema --parse Order.java           # Inspect parsed schema
+```
 
 ## Web UI Usage
 
@@ -72,11 +90,13 @@ python run_ui.py -- --server.port 8501
 
 ### Features
 
-- **Load Data**: Enter a path to a `.cq4` file or folder in the sidebar
-- **Browse Messages**: View messages in a paginated table with filtering
-- **Search**: Search by field name, value, or message type
-- **Filter**: Filter by message type or field existence
-- **Export**: Export to CSV with field selection
+- **File Browser**: Navigate folders with parent directory, Home, and Desktop shortcuts
+- **Browse Messages**: View messages in a paginated table with column selection
+- **Filter**: Filter by message type, field existence, or field value (eq, gt, contains, regex, etc.)
+- **Search**: Search by field name, value, or message type with match context
+- **Export**: Export to CSV with field selection (consistent with CLI export)
+- **Schema**: View loaded schema status and clear stale schemas
+- **Cell Viewer**: Inspect full values of truncated cells
 
 ## Programmatic Usage
 
@@ -126,8 +146,9 @@ cqviewer/
 │       ├── search_service.py    # Search functionality
 │       ├── filter_service.py    # Filter criteria
 │       └── export_service.py    # CSV export
-├── run_cli.py           # Enhanced CLI (rich/tabulate)
+├── run_cli.py           # Quick CLI (rich/tabulate)
 ├── run_ui.py            # Web UI (streamlit)
+├── src/cqviewer/cli.py  # Advanced CLI (subcommands, schema support)
 └── tests/               # Automated tests
 ```
 
@@ -145,6 +166,14 @@ PYTHONPATH=src pytest tests/ -v
 - Ensure the file is a valid Chronicle Queue `.cq4` file
 - Check that the file is not currently being written to by another process
 - Try with a smaller file first to verify the installation works
+
+## Support
+
+If you find this project useful, consider supporting its development:
+
+- [GitHub Sponsors](https://github.com/sponsors/chanchunyinjohnny)
+- [Buy Me a Coffee](https://buymeacoffee.com/chanchunyinjohnny)
+- [Ko-fi](https://ko-fi.com/chanchunyinjohnny)
 
 ## License
 

@@ -229,6 +229,21 @@ class CQViewerCLI:
                 value = field.format_value(max_length=100)
                 print(f"  {name}: {value}")
 
+    def _get_match_context(self, msg, query: str) -> str:
+        """Get brief description of why a message matched."""
+        query_lower = query.lower()
+        if msg.type_hint and query_lower in msg.type_hint.lower():
+            return f"type: {msg.type_hint}"
+        for name in msg.field_names(include_nested=True):
+            if query_lower in name.lower():
+                return f"field: {name}"
+        for name, field in msg.fields.items():
+            val_str = str(field.value) if field.value is not None else ""
+            if query_lower in val_str.lower():
+                preview = val_str[:30] + "..." if len(val_str) > 30 else val_str
+                return f"{name}={preview}"
+        return ""
+
     def search(self, query: str, limit: int = 20):
         """Search messages."""
         results = self.search_service.search_combined(self.messages, query)
@@ -236,8 +251,14 @@ class CQViewerCLI:
         self.print_info(f"\nFound {len(results)} matches for '{query}'", style="bold")
 
         if results:
-            rows = [{"Index": m.index, "Type": m.type_hint or "unknown"} for m in results[:limit]]
-            self.print_table(rows, ["Index", "Type"])
+            rows = []
+            for m in results[:limit]:
+                rows.append({
+                    "Index": m.index,
+                    "Type": m.type_hint or "unknown",
+                    "Match": self._get_match_context(m, query),
+                })
+            self.print_table(rows, ["Index", "Type", "Match"])
 
             if len(results) > limit:
                 self.print_info(f"... and {len(results) - limit} more", style="dim")
@@ -323,7 +344,7 @@ Examples:
         elif args.fields:
             cli.show_fields()
         elif args.export:
-            export_fields = args.export_fields.split(",") if args.export_fields else None
+            export_fields = [f.strip() for f in args.export_fields.split(",")] if args.export_fields else None
             cli.export(args.export, type_filter=args.type, fields=export_fields)
         else:
             cli.list_messages(offset=args.offset, limit=args.limit, type_filter=args.type)

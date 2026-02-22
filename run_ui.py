@@ -79,6 +79,9 @@ def load_data(path: str, include_metadata: bool = False):
 
     schema_loaded = False
 
+    # Clear any stale schema from previous loads
+    msg_service.set_schema(None)
+
     if p.is_dir():
         # Load schema from directory if available
         java_files = list(p.rglob("*.java")) + list(p.rglob("*.class"))
@@ -90,12 +93,15 @@ def load_data(path: str, include_metadata: bool = False):
                 pass
 
         # Find .cq4 files
-        cq4_files = list(p.glob("*.cq4"))
+        cq4_files = sorted(p.glob("*.cq4"))
         if not cq4_files:
             return None, "No .cq4 files found in folder"
+        # Return list of cq4 files for selection
         file_path = str(cq4_files[0])
+        cq4_file_list = [str(f) for f in cq4_files]
     else:
         file_path = str(p)
+        cq4_file_list = [file_path]
 
     try:
         info = msg_service.load_file(file_path, include_metadata=include_metadata)
@@ -108,7 +114,9 @@ def load_data(path: str, include_metadata: bool = False):
             "messages": messages,
             "types": types,
             "fields": fields,
-            "schema_loaded": schema_loaded
+            "schema_loaded": schema_loaded,
+            "cq4_files": cq4_file_list,
+            "loaded_file": file_path,
         }, None
     except Exception as e:
         return None, str(e)
@@ -134,6 +142,32 @@ def messages_to_dataframe(messages, columns=None):
     return pd.DataFrame(rows)
 
 
+def _get_match_context(msg, query: str, search_type: str) -> str:
+    """Get a brief description of why a message matched a search query."""
+    query_lower = query.lower()
+
+    # Check type match
+    if search_type in ("All", "Message Types"):
+        if msg.type_hint and query_lower in msg.type_hint.lower():
+            return f"type: {msg.type_hint}"
+
+    # Check field name match
+    if search_type in ("All", "Field Names"):
+        for name in msg.field_names(include_nested=True):
+            if query_lower in name.lower():
+                return f"field name: {name}"
+
+    # Check field value match
+    if search_type in ("All", "Field Values"):
+        for name, field in msg.fields.items():
+            val_str = str(field.value) if field.value is not None else ""
+            if query_lower in val_str.lower():
+                preview = val_str[:60] + "..." if len(val_str) > 60 else val_str
+                return f"{name} = {preview}"
+
+    return "matched"
+
+
 def main():
     st.title("📊 CQViewer")
     st.markdown("Chronicle Queue (.cq4) File Viewer")
@@ -151,13 +185,18 @@ def main():
         # File browser
         current_path = Path(st.session_state.browser_path)
 
-        # Quick navigation
-        col1, col2 = st.columns(2)
+        # Quick navigation (#8: added parent directory button)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("🏠 Home", use_container_width=True):
                 st.session_state.browser_path = str(Path.home())
                 st.rerun()
         with col2:
+            parent = current_path.parent
+            if st.button("⬆ Up", use_container_width=True, disabled=(parent == current_path)):
+                st.session_state.browser_path = str(parent)
+                st.rerun()
+        with col3:
             if st.button("🖥️ Desktop", use_container_width=True):
                 st.session_state.browser_path = str(Path.home() / "Desktop")
                 st.rerun()
@@ -236,6 +275,19 @@ def main():
 
         st.divider()
 
+        # (#13) Schema status and clear
+        services = get_services()
+        schema = services["message"]._schema
+        if schema:
+            st.caption(f"Schema: {len(schema.messages)} types ({schema.encoding})")
+            if st.button("Clear Schema", use_container_width=True):
+                services["message"].set_schema(None)
+                st.rerun()
+        else:
+            st.caption("Schema: Not loaded")
+
+        st.divider()
+
         # Session state for loaded data
         if "data" not in st.session_state:
             st.session_state.data = None
@@ -263,6 +315,11 @@ def main():
     messages = data["messages"]
     types = data["types"]
     fields = data["fields"]
+
+    # (#9) Show which file was loaded, allow switching if multiple
+    cq4_files_list = data.get("cq4_files", [])
+    if len(cq4_files_list) > 1:
+        st.info(f"Loaded: {Path(data['loaded_file']).name} ({len(cq4_files_list)} .cq4 files in folder)")
 
     # Info panel
     col1, col2, col3, col4 = st.columns(4)
@@ -298,92 +355,138 @@ def main():
         with col3:
             page_size = st.selectbox("Page Size", [25, 50, 100, 200], index=1)
 
+        # (#11) Field value filter
+        with st.expander("Advanced: Filter by Field Value"):
+            fv_col1, fv_col2, fv_col3 = st.columns([2, 1, 2])
+            with fv_col1:
+                value_filter_field = st.selectbox(
+                    "Field",
+                    options=["None"] + fields,
+                    index=0,
+                    key="value_filter_field"
+                )
+            with fv_col2:
+                value_filter_op = st.selectbox(
+                    "Operator",
+                    options=["eq", "ne", "gt", "gte", "lt", "lte", "contains", "regex"],
+                    index=0,
+                    key="value_filter_op"
+                )
+            with fv_col3:
+                value_filter_val = st.text_input(
+                    "Value",
+                    key="value_filter_val"
+                )
+
         # Apply filters
         filtered = messages
-        services = get_services()
 
+        # (#2) Use exact=True for type filter from dropdown
         if type_filter != "All":
-            filtered = services["filter"].filter_by_type(filtered, type_filter)
+            filtered = services["filter"].filter_by_type(filtered, type_filter, exact=True)
 
         if field_filter != "All":
             filtered = services["filter"].filter_by_field_exists(filtered, field_filter)
 
-        # Pagination
-        total = len(filtered)
-        total_pages = (total + page_size - 1) // page_size
-        page = st.number_input("Page", min_value=1, max_value=max(1, total_pages), value=1)
-
-        start = (page - 1) * page_size
-        end = min(start + page_size, total)
-        page_messages = filtered[start:end]
-
-        st.caption(f"Showing {start + 1}-{end} of {total} messages")
-
-        # Display as dataframe
-        if page_messages:
-            df = messages_to_dataframe(page_messages)
-
-            # Select columns to display (all columns by default)
-            available_cols = list(df.columns)
-            selected_cols = st.multiselect(
-                "Columns to display",
-                options=available_cols,
-                default=available_cols
+        # (#11) Apply field value filter
+        if value_filter_field != "None" and value_filter_val:
+            # Try numeric conversion for comparison operators
+            filter_val = value_filter_val
+            if value_filter_op in ("gt", "gte", "lt", "lte", "eq", "ne"):
+                try:
+                    filter_val = int(value_filter_val)
+                except ValueError:
+                    try:
+                        filter_val = float(value_filter_val)
+                    except ValueError:
+                        pass
+            filtered = services["filter"].filter_by_field_value(
+                filtered, value_filter_field, value_filter_op, filter_val
             )
 
-            if selected_cols:
-                st.dataframe(
-                    df[selected_cols],
-                    use_container_width=True,
-                    hide_index=True
+        # Pagination
+        total = len(filtered)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+
+        # (#3) Handle empty results
+        if total == 0:
+            st.caption("No messages found matching the current filters")
+        else:
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+
+            start = (page - 1) * page_size
+            end = min(start + page_size, total)
+            page_messages = filtered[start:end]
+
+            st.caption(f"Showing {start + 1}-{end} of {total} messages")
+
+            # Display as dataframe
+            if page_messages:
+                df = messages_to_dataframe(page_messages)
+
+                # Select columns to display (all columns by default)
+                available_cols = list(df.columns)
+                selected_cols = st.multiselect(
+                    "Columns to display",
+                    options=available_cols,
+                    default=available_cols
                 )
 
-                # Cell value viewer
-                st.subheader("Cell Value Viewer")
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    row_idx = st.number_input(
-                        "Row number",
-                        min_value=0,
-                        max_value=max(0, len(df) - 1),
-                        value=0,
-                        key="cell_viewer_row"
-                    )
-                with col2:
-                    cell_column = st.selectbox(
-                        "Column",
-                        options=selected_cols,
-                        key="cell_viewer_col"
+                if selected_cols:
+                    st.dataframe(
+                        df[selected_cols],
+                        use_container_width=True,
+                        hide_index=True
                     )
 
-                cell_value = df.iloc[row_idx].get(cell_column, "")
-                st.text_area(
-                    f"Full value of '{cell_column}' (Row {row_idx})",
-                    value=str(cell_value),
-                    height=150,
-                    key="cell_value_display"
-                )
+                    # Cell value viewer
+                    st.subheader("Cell Value Viewer")
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        row_idx = st.number_input(
+                            "Row number",
+                            min_value=0,
+                            max_value=max(0, len(df) - 1),
+                            value=0,
+                            key="cell_viewer_row"
+                        )
+                    with col2:
+                        cell_column = st.selectbox(
+                            "Column",
+                            options=selected_cols,
+                            key="cell_viewer_col"
+                        )
 
-        # Message detail view
+                    cell_value = df.iloc[row_idx].get(cell_column, "")
+                    st.text_area(
+                        f"Full value of '{cell_column}' (Row {row_idx})",
+                        value=str(cell_value),
+                        height=150,
+                        key="cell_value_display"
+                    )
+
+        # (#6) Message detail view - use actual message indices
         st.subheader("Message Detail")
-        msg_index = st.number_input(
-            "Enter message index to view details",
-            min_value=0,
-            max_value=max(0, len(messages) - 1),
-            value=0
-        )
+        if messages:
+            msg_indices = [m.index for m in messages]
+            msg_index = st.selectbox(
+                "Select message index to view details",
+                options=msg_indices,
+                index=0,
+                key="msg_detail_index"
+            )
 
-        if st.button("View Message"):
-            msg = services["message"].get_message(msg_index)
-            if msg:
-                st.json({
-                    "index": msg.index,
-                    "offset": msg.offset,
-                    "type": msg.type_hint,
-                    "fields": {name: field.format_value() for name, field in msg.fields.items()}
-                })
-            else:
-                st.warning(f"Message {msg_index} not found")
+            if st.button("View Message"):
+                msg = services["message"].get_message(msg_index)
+                if msg:
+                    st.json({
+                        "index": msg.index,
+                        "offset": msg.offset,
+                        "type": msg.type_hint,
+                        "fields": {name: field.format_value() for name, field in msg.fields.items()}
+                    })
+                else:
+                    st.warning(f"Message {msg_index} not found")
 
     with tab2:
         st.subheader("Search")
@@ -414,7 +517,17 @@ def main():
             st.success(f"Found {len(results)} matches")
 
             if results:
-                df = messages_to_dataframe(results[:max_results])
+                # (#10) Show match context
+                context_rows = []
+                for msg in results[:max_results]:
+                    match_reason = _get_match_context(msg, search_query, search_type)
+                    row = {
+                        "Index": msg.index,
+                        "Type": msg.type_hint or "unknown",
+                        "Match": match_reason,
+                    }
+                    context_rows.append(row)
+                df = pd.DataFrame(context_rows)
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
                 if len(results) > max_results:
@@ -439,7 +552,7 @@ def main():
     with tab4:
         st.subheader("Export to CSV")
 
-        # Filter options
+        # Filter options (#2: exact match for export type filter too)
         export_type = st.selectbox(
             "Filter by Type (optional)",
             options=["All"] + types,
@@ -467,28 +580,21 @@ def main():
         if st.button("Generate CSV", type="primary"):
             export_messages = messages
             if export_type != "All":
-                export_messages = services["filter"].filter_by_type(export_messages, export_type)
+                export_messages = services["filter"].filter_by_type(
+                    export_messages, export_type, exact=True
+                )
 
             if not export_messages:
                 st.warning("No messages to export")
             else:
-                # Build dataframe for export
-                rows = []
-                for msg in export_messages:
-                    row = {}
-                    if include_index:
-                        row["Index"] = msg.index
-                    if include_type_col:
-                        row["Type"] = msg.type_hint or ""
-                    if include_offset:
-                        row["Offset"] = msg.offset
-                    for field_name in export_fields:
-                        field = msg.get_field(field_name)
-                        row[field_name] = field.format_value() if field else ""
-                    rows.append(row)
-
-                export_df = pd.DataFrame(rows)
-                csv = export_df.to_csv(index=False)
+                # (#7) Use ExportService for consistent behavior
+                csv = services["export"].export_to_csv(
+                    export_messages,
+                    fields=export_fields if export_fields else None,
+                    include_index=include_index,
+                    include_offset=include_offset,
+                    include_type=include_type_col,
+                )
 
                 st.download_button(
                     label=f"Download CSV ({len(export_messages)} messages)",
@@ -500,7 +606,17 @@ def main():
 
                 # Preview
                 st.subheader("Preview (first 10 rows)")
-                st.dataframe(export_df.head(10), use_container_width=True, hide_index=True)
+                preview_rows = services["export"].preview_export(
+                    export_messages,
+                    fields=export_fields if export_fields else None,
+                    limit=10,
+                )
+                if preview_rows:
+                    st.dataframe(
+                        pd.DataFrame(preview_rows),
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
 
 if __name__ == "__main__":
