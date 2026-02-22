@@ -1,19 +1,34 @@
 # CQViewer
 
-A Python tool for inspecting and exporting Chronicle Queue (.cq4) data files.
+A Python tool for inspecting and exporting Chronicle Queue (.cq4) data files. Automatically detects and decodes multiple binary encoding formats including Chronicle Wire, SBE (Simple Binary Encoding), and Apache Thrift.
 
 ## Features
 
-- **View Messages**: Browse Chronicle Queue messages with pagination (50-100 rows per page)
-- **Search**: Find messages by field name, field value, or message type
-- **Filter**: Filter messages by type or field existence
-- **Export**: Export messages to CSV with customizable field selection
-- **Detail View**: Inspect individual messages in tree, JSON, or flat view
+- **Multi-Format Decoding**: Automatically detects and decodes Chronicle Wire binary, SBE, and Thrift-encoded messages
+- **Java Schema Support**: Parse `.java` source files and `.class` bytecode to extract field definitions and detect encoding format
+- **View Messages**: Browse messages with pagination, column selection, and nested field support (dot notation)
+- **Search**: Find messages by field name, field value, or message type with match context and regex support
+- **Filter**: Filter by type, field existence, or field value with operators (eq, ne, gt, gte, lt, lte, contains, regex)
+- **Export**: Export to CSV with customizable field selection and nested object flattening
+- **Detail View**: Inspect individual messages in JSON or flat view
+- **Zero Core Dependencies**: Base functionality uses only the Python standard library; optional dependencies for enhanced CLI and Web UI
+
+## Supported Encoding Formats
+
+CQViewer automatically detects and decodes messages in the following formats:
+
+| Format | Detection Method | Description |
+|--------|-----------------|-------------|
+| **Chronicle Wire Binary** | Native | Chronicle Queue's self-describing binary format with 40+ wire type codes |
+| **SBE (Simple Binary Encoding)** | `@SbeField` annotations or `uk.co.real_logic.sbe` imports in Java schema | Fixed-size fields (int8–int64, float, double, char) with header parsing |
+| **Apache Thrift (TCompactProtocol)** | `org.apache.thrift.TBase` or `TField` patterns in Java schema | Compact protocol with zigzag varint encoding, nested structs, and collections |
+
+Encoding is auto-detected from Java source files, or can be explicitly specified with the `-E` flag.
 
 ## Requirements
 
 - Python 3.10+
-- No external dependencies for standard CLI mode (works in air-gapped/intranet environments)
+- No external dependencies for core functionality (works in air-gapped/intranet environments)
 - Optional dependencies:
   - `rich` + `tabulate`: Enhanced CLI output (`run_cli.py`)
   - `streamlit` + `pandas`: Web UI (`run_ui.py`)
@@ -70,10 +85,19 @@ cqviewer list data.cq4 -n 50                 # List messages with pagination
 cqviewer show data.cq4 3                     # Show message at index 3
 cqviewer search data.cq4 "orderId"           # Search messages
 cqviewer export data.cq4 -o out.csv          # Export to CSV
-cqviewer list data.cq4 -S Order.java         # Load with Java schema
-cqviewer list data.cq4 -D ./model/ -E thrift # Load with directory schema + encoding
-cqviewer schema --parse Order.java           # Inspect parsed schema
+cqviewer list data.cq4 -S Order.java         # Load Java schema (auto-detects encoding)
+cqviewer list data.cq4 -D ./model/ -E thrift # Load directory schema + explicit encoding
+cqviewer list data.cq4 -D ./model/ -E sbe    # Load with SBE encoding override
+cqviewer schema --parse Order.java           # Inspect parsed schema and detected encoding
 ```
+
+#### Schema and Encoding Options
+
+| Option | Description |
+|--------|-------------|
+| `-S, --schema FILE` | Load a Java source file (`.java`) or class file (`.class`) as schema |
+| `-D, --schema-dir DIR` | Recursively scan a directory for `.java` and `.class` files |
+| `-E, --encoding FORMAT` | Override encoding format: `binary`, `thrift`, or `sbe` |
 
 ## Web UI Usage
 
@@ -91,11 +115,11 @@ python run_ui.py -- --server.port 8501
 ### Features
 
 - **File Browser**: Navigate folders with parent directory, Home, and Desktop shortcuts
-- **Browse Messages**: View messages in a paginated table with column selection
-- **Filter**: Filter by message type, field existence, or field value (eq, gt, contains, regex, etc.)
-- **Search**: Search by field name, value, or message type with match context
-- **Export**: Export to CSV with field selection (consistent with CLI export)
-- **Schema**: View loaded schema status and clear stale schemas
+- **Browse Messages**: Paginated table with configurable page size (25/50/100/200 rows) and column selection
+- **Filter**: Filter by message type, field existence, or field value (eq, ne, gt, gte, lt, lte, contains, regex)
+- **Search**: Search by field name, value, or message type with match context and result limit control
+- **Export**: Export to CSV with field selection, optional Index/Type/Offset columns, and preview
+- **Schema**: Auto-detected from directory; view loaded schema status (type count, encoding) and clear stale schemas
 - **Cell Viewer**: Inspect full values of truncated cells
 
 ## Programmatic Usage
@@ -132,25 +156,42 @@ export.export_to_csv(orders, "output.csv", fields=["customerId", "amount"])
 ```
 cqviewer/
 ├── src/cqviewer/
-│   ├── parser/          # Binary format parsing
-│   │   ├── wire_types.py    # Type code constants
-│   │   ├── stop_bit.py      # Variable-length integer decoder
-│   │   ├── wire_reader.py   # Chronicle Wire binary parser
-│   │   └── cq4_reader.py    # .cq4 file reader (mmap-based)
-│   ├── models/          # Data structures
-│   │   ├── message.py       # Message representation
-│   │   ├── field.py         # Field with type info
-│   │   └── queue_info.py    # Queue metadata
-│   └── services/        # Business logic
-│       ├── message_service.py   # Load/cache/paginate
-│       ├── search_service.py    # Search functionality
-│       ├── filter_service.py    # Filter criteria
-│       └── export_service.py    # CSV export
-├── run_cli.py           # Quick CLI (rich/tabulate)
-├── run_ui.py            # Web UI (streamlit)
-├── src/cqviewer/cli.py  # Advanced CLI (subcommands, schema support)
-└── tests/               # Automated tests
+│   ├── parser/              # Binary format parsing
+│   │   ├── wire_types.py        # Wire type code constants (40+)
+│   │   ├── stop_bit.py          # Variable-length (stop-bit) integer decoder
+│   │   ├── wire_reader.py       # Chronicle Wire binary parser
+│   │   ├── cq4_reader.py        # .cq4 file reader (mmap-based)
+│   │   ├── java_parser.py       # Java source/bytecode parser with encoding detection
+│   │   ├── schema.py            # Schema definitions and BinaryDecoder
+│   │   ├── sbe_decoder.py       # SBE (Simple Binary Encoding) decoder
+│   │   └── thrift_decoder.py    # Apache Thrift TCompactProtocol decoder
+│   ├── models/              # Data structures
+│   │   ├── message.py           # Message with nested field support
+│   │   ├── field.py             # Field with type inference and formatting
+│   │   └── queue_info.py        # Queue metadata
+│   └── services/            # Business logic
+│       ├── message_service.py   # Load/cache/paginate/schema management
+│       ├── search_service.py    # Multi-mode search with regex and match context
+│       ├── filter_service.py    # Composite filtering with 8 operators
+│       └── export_service.py    # CSV export with field flattening
+├── run_cli.py               # Quick CLI (rich/tabulate)
+├── run_ui.py                # Web UI (streamlit)
+├── src/cqviewer/cli.py      # Advanced CLI (subcommands, schema, encoding)
+└── tests/                   # 288 automated tests
 ```
+
+## How It Works
+
+1. **File Reading**: CQ4 files are read using memory-mapped I/O for efficient access. The reader parses the Chronicle Queue file header (version, roll cycle, index info) and iterates through excerpt headers to extract messages.
+
+2. **Wire Format Parsing**: Messages in Chronicle Wire's self-describing binary format are decoded natively, supporting 40+ wire type codes including primitives, strings, timestamps, UUIDs, nested objects, and arrays.
+
+3. **Schema-Based Decoding**: When Java source (`.java`) or bytecode (`.class`) files are provided, the parser:
+   - Extracts field definitions (name, type, annotations)
+   - Auto-detects the encoding format (SBE, Thrift, or plain binary) from imports and annotations
+   - Uses the appropriate decoder (SBEDecoder, ThriftDecoder, or BinaryDecoder) to interpret the binary payload
+
+4. **Search & Filter**: Messages can be searched by field name, value (with regex), or type. Filters support 8 comparison operators and can be combined with AND logic.
 
 ## Running Tests
 
